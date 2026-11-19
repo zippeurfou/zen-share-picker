@@ -15,6 +15,7 @@ HEADLESS=1 uv run --project tests/acceptance python tests/install/real_run.py --
 HEADLESS=1 uv run --project tests/acceptance python tests/install/real_run.py --existing --no-sideload-prefs
 HEADLESS=1 uv run --project tests/acceptance python tests/install/real_running.py
 HEADLESS=1 uv run --project tests/acceptance python tests/install/real_uninstall.py
+HEADLESS=1 uv run --project tests/acceptance python tests/install/real_list_windows.py
 ```
 
 The harness sets `MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1` for the Zen it starts, so
@@ -34,6 +35,7 @@ the install. `--no-sideload-prefs` is a control: it pins Zen's shipped values
 | `real_run.py --existing --no-sideload-prefs` (control) | `isActive: false`, `userDisabled: true` | FAIL, as expected |
 | `real_running.py` | while the harness Zen holds `.parentlock`: install exit 1 and `--uninstall` exit 1 ("Zen is running on ..."), `--dry-run` exit 0 with "note: Zen may be running on this profile", nothing written; after Zen quit, install exit 0 | PASS |
 | `real_uninstall.py` | every step below ok | PASS |
+| `real_list_windows.py` | every step of "`--list-windows`" below ok | PASS |
 | `install.py --profile <dir> --latest` | exit 1, "no release has been published yet; pass --xpi PATH ...", nothing written | as expected while no release exists |
 
 No test Zen process and no temporary profile was left after the runs.
@@ -79,7 +81,26 @@ scan, which lists it as a disabled sideload. That matches the control.
 5. A second start and quit is still clean.
 
 The unit tests add what a real run cannot show cheaply: `--uninstall` deletes
-the `user_pref` lines of exactly the four names, keeps every other byte
+the `user_pref` lines of exactly the five names (the four of the block and
+the `--list-windows` pref, whatever the block held), keeps every other byte
 (including `media.getusermedia.browser.enabled`, which the block does not
 set), writes through a symlinked `prefs.js` or `user.js`, and leaves a
 zen-space-scope block in `user.js` byte for byte.
+
+## `--list-windows` (P54)
+
+`real_list_windows.py`, temp profile, headless. It opens no share prompt and
+lists no window: it only reads prefs.
+
+1. Install with `--list-windows`, start Zen: add-on `active`,
+   `media.getdisplaymedia.screencapturekit.picker.enabled` is `false` as a
+   user value (Zen's default is `true`). After quitting, `prefs.js` holds its
+   line.
+2. Install again without the flag: it prints `reset
+   media.getdisplaymedia.screencapturekit.picker.enabled in prefs.js`,
+   `user.js` holds the four-pref block, and `prefs.js` has no picker line but
+   keeps the four block prefs.
+3. Start Zen: the pref has no user value (back to `true`). After quitting,
+   `prefs.js` still has no picker line.
+4. Install with the flag, start, quit, `--uninstall`: it resets all five and
+   `prefs.js` has none of them.

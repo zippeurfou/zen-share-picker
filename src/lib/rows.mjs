@@ -1,4 +1,5 @@
-const OS_LABEL = "Apps, windows or a screen...";
+const OS_LABEL_MACOS = "Open the macOS picker (apps, windows or a screen)";
+const OS_LABEL = "Open the system picker (apps, windows or a screen)";
 
 export function belongsHere(t, here) {
   if (here.spaceId === null) {
@@ -67,7 +68,7 @@ function toRow(t, group, spaceLabel) {
   };
 }
 
-export function buildModel(facts, here, spaceNames, os) {
+export function buildModel(facts, here, spaceNames, os, captures = []) {
   const tabs = dedupe(facts);
   const hereFacts = [];
   const groups = new Map();
@@ -104,7 +105,12 @@ export function buildModel(facts, here, spaceNames, os) {
   return {
     here: hereFacts.sort(byRecency).map(t => toRow(t, "here", null)),
     others,
-    os: { key: "os", label: OS_LABEL, available: !!os.available },
+    os: {
+      key: "os",
+      label: os.macos ? OS_LABEL_MACOS : OS_LABEL,
+      available: !!os.available,
+    },
+    captures,
   };
 }
 

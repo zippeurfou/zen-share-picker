@@ -20,10 +20,21 @@ function setup(over = {}) {
     // Whether an Allow click at time t is taken (the prompt goes).
     accepts: t => t >= DELAY,
     shows: () => true,
+    // Devices of the active streams, as {mediaSource, rawId}; null means
+    // the selected device, as the target's own kind.
+    devices: null,
     throws: null,
     ...over,
   };
-  const s = { t: 0, selected: "initial", gone: false, clicks: [], calls: [], kinds: [] };
+  const s = {
+    t: 0,
+    selected: "initial",
+    gone: false,
+    clicks: [],
+    calls: [],
+    kinds: [],
+    verifyKinds: [],
+  };
   const rec = name => {
     if (cfg.throws === name) {
       throw new Error("boom " + name);
@@ -70,9 +81,16 @@ function setup(over = {}) {
         s.gone = true;
       }
     },
-    sharingShows: id => {
+    // As the real port: tab maps to "browser", window and screen to
+    // themselves.
+    sharingShows: (id, kind) => {
       rec("verify");
-      return id === s.selected && cfg.shows(s.t);
+      s.verifyKinds.push(kind);
+      const source = kind === "tab" ? "browser" : kind;
+      const devices = cfg.devices ?? [{ mediaSource: source, rawId: s.selected }];
+      return (
+        cfg.shows(s.t) && devices.some(d => d.mediaSource === source && String(d.rawId) === id)
+      );
     },
   };
   const lines = [];
@@ -262,4 +280,26 @@ test("a_throw_after_close_but_before_a_click_is_assist", async () => {
   const outcome = await run();
   assert.equal(outcome, "assist");
   assert.equal(s.clicks.length, 0);
+});
+
+// A window share is verified by kind: a tab stream with the same id (a
+// window id can equal a tab's browserId) is not that window.
+test("verifies_a_window_by_kind", async () => {
+  const target = { kind: "window", deviceId: "42" };
+  const tab = setup({ devices: [{ mediaSource: "browser", rawId: 42 }] });
+  assert.equal(await tab.run({ target }), "unverified");
+  assert.deepEqual([...new Set(tab.s.verifyKinds)], ["window"]);
+  const win = setup({ devices: [{ mediaSource: "window", rawId: 42 }] });
+  assert.equal(await win.run({ target }), "shared");
+  assert.deepEqual([...new Set(win.s.verifyKinds)], ["window"]);
+});
+
+test("screen_target_runs_the_same_sequence", async () => {
+  const { s, run } = setup();
+  const outcome = await run({ target: { kind: "screen", deviceId: "3" } });
+  assert.equal(outcome, "shared");
+  assert.deepEqual(folded(s.calls), ["stopPreview", "select", "close", "wait", "click", "verify"]);
+  assert.deepEqual(s.kinds, ["screen"]);
+  assert.equal(s.verifyKinds[0], "screen");
+  assert.equal(s.clicks.length, 1);
 });

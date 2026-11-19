@@ -116,10 +116,13 @@ function read(win, showing) {
       return fail("bad-entry");
     }
     seen.add(key);
-    entries.push({ deviceId, mediaSource: item.mediaSource, item });
-  }
-  if (!entries.some(e => e.mediaSource === "browser")) {
-    return fail("no-tab-entries");
+    // The label is a window's title: it stays in memory and the picker.
+    entries.push({
+      deviceId,
+      mediaSource: item.mediaSource,
+      label: item.getAttribute("label") ?? "",
+      item,
+    });
   }
 
   const initialItem = menulist.selectedItem ?? null;
@@ -186,6 +189,9 @@ export function makePort(win, info, { Services, ChromeUtils, webrtcUI }) {
     // As a user's pick: select the item, then its command event runs Zen's
     // own checks (invalidselection) and starts the stock preview. A "tab"
     // target must be a tab entry, and an "os" target the recorded OS entry.
+    // A "window" or "screen" target must be an entry of that kind whose row
+    // the picker listed (`info.captures`), so a hidden window (P50) and the
+    // OS entry are never selected this way.
     select: guard((deviceId, kind) => {
       const list = menulist();
       // Found by kind and id: another kind may use the same id.
@@ -196,6 +202,14 @@ export function makePort(win, info, { Services, ChromeUtils, webrtcUI }) {
           null;
       } else if (kind === "os" && info.osEntry && info.osEntry.deviceId === deviceId) {
         entry = info.osEntry;
+      } else if (
+        (kind === "window" || kind === "screen") &&
+        (info.captures ?? []).some(r => r.key === kind + ":" + deviceId)
+      ) {
+        entry =
+          info.entries.find(
+            e => e.deviceId === deviceId && e.mediaSource === kind && e !== info.osEntry
+          ) ?? null;
       }
       if (!entry || entry.item.parentNode?.parentNode !== list) {
         return false;
@@ -265,18 +279,22 @@ export function makePort(win, info, { Services, ChromeUtils, webrtcUI }) {
       false
     ),
 
-    sharingShows: guard(
-      deviceId =>
-        webrtcUI
-          .getActiveStreams(true, true, true, true, true)
-          .some(
-            s =>
-              s.browser === browser &&
-              (s.devices ?? []).some(
-                d => d.mediaSource === "browser" && String(d.rawId) === deviceId
-              )
-          ),
-      false
-    ),
+    // Whether a stream of this browser shares the device, by kind and id:
+    // a window's id can equal a tab's browserId.
+    sharingShows: guard((deviceId, kind) => {
+      const source = kind === "tab" ? "browser" : kind;
+      if (source !== "browser" && source !== "window" && source !== "screen") {
+        return false;
+      }
+      return webrtcUI
+        .getActiveStreams(true, true, true, true, true)
+        .some(
+          s =>
+            s.browser === browser &&
+            (s.devices ?? []).some(
+              d => d.mediaSource === source && String(d.rawId) === deviceId
+            )
+        );
+    }, false),
   };
 }

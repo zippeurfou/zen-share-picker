@@ -15,6 +15,7 @@ const MODULES = {
   arming: "src/lib/arming.mjs",
   config: "src/lib/config.mjs",
   rows: "src/lib/rows.mjs",
+  captures: "src/lib/captures.mjs",
   share: "src/lib/share.mjs",
   decline: "src/lib/decline.mjs",
   prompt: "src/glue/prompt.sys.mjs",
@@ -23,6 +24,7 @@ const MODULES = {
   watch: "src/glue/watch.sys.mjs",
   selfcheck: "src/glue/selfcheck.sys.mjs",
   conceal: "src/glue/conceal.sys.mjs",
+  windows: "src/glue/windows.sys.mjs",
 };
 const CSS = "src/glue/picker.css";
 // Firefox internals; the startup checks cover both.
@@ -33,8 +35,10 @@ const INTERNALS = {
 // The stock screen-share notification (WebRTCParent.sys.mjs).
 const PROMPT_ID = "webRTC-shareDevices";
 const DELAY_PREF = "security.notification_enable_delay";
+// Zen's own switch for its prompt's previews (WebRTCParent.sys.mjs).
+const PREVIEWS_PREF = "media.getdisplaymedia.previews.enabled";
 // Prompts the picker has nothing to offer for; not problems.
-const SILENT = new Set(["no-tab-entries", "not-screen-request", "mixed-request"]);
+const SILENT = new Set(["not-screen-request", "mixed-request"]);
 const MAX_PROBLEMS = 10;
 // P64 (c): the longest a hiding taken in popupshowing waits for a picker.
 const EARLY_HIDE_MS = 3000;
@@ -93,8 +97,9 @@ function tabsOf(win) {
 //
 // Per window, a PanelUpdated for the share prompt opens the picker on the
 // next tick (onPrompt). One open picker per window, in `sessions`. A prompt
-// the user declined or handed to the stock dropdown (`declined`), or that a
-// share ran on (`sharing`), never gets a picker again. Esc and Cancel
+// the user declined (`declined`), or that a share ran on (`sharing`), never
+// gets a picker again. P52: a prompt gets a picker when it lists a tab or a
+// screen or window row; Zen's own windows are never rows (P50). Esc and Cancel
 // decline the request (P36, P38); every other close leaves it pending.
 //
 // P35: each session owns its hiding of Zen's panel (`conceal`). It hides
@@ -136,6 +141,10 @@ class Picker {
     this.early = new Map();
     // Notification -> the OS entry's deviceId (or null), from its first read.
     this.osIds = new WeakMap();
+    // P70: notification -> the ids of Zen's windows seen at any of its reads.
+    this.zenIds = new WeakMap();
+    // Notifications whose Zen window ids could not be read, recorded once.
+    this.idsUnknown = new WeakSet();
   }
 
   start() {
@@ -427,7 +436,8 @@ class Picker {
   }
 
   // P48: whether the panel about to show holds only a share prompt that
-  // onPrompt would open a picker for. WebRTC builds the dropdown in its
+  // onPrompt would open a picker for, by the same rule (P52: a tab entry or
+  // a screen or window row). WebRTC builds the dropdown in its
   // "showing" callback, and PopupNotifications fills the panel, before
   // openPopup (PopupNotifications.sys.mjs _showPanel), so this reads the same
   // prompt. Records nothing.
@@ -448,10 +458,61 @@ class Picker {
       if (this.declined.has(n) || this.sharing.has(n)) {
         return false;
       }
-      return m.tabs.tabFacts(read.info.entries, win, read.info.browser, Services).ok;
+      const info = { ...read.info, osEntry: this.osEntryOf(read.info, false) };
+      if (!this.offersRows(info, this.capturesOf(info, false))) {
+        return false;
+      }
+      return m.tabs.tabFacts(info.entries, win, info.browser, Services).ok;
     } catch {
       return false;
     }
+  }
+
+  // P17: the OS entry is the one Zen pre-selected when the prompt was
+  // first shown. Zen rebuilds the dropdown each time the prompt shows
+  // (WebRTCParent.sys.mjs listScreenShareDevices), so a later read finds
+  // that entry again by its deviceId, never by the selection. `remember`
+  // records the first read's; handles() records nothing.
+  osEntryOf(info, remember) {
+    const n = info.notification;
+    if (!this.osIds.has(n)) {
+      if (remember) {
+        this.osIds.set(n, info.osEntry ? info.osEntry.deviceId : null);
+      }
+      return info.osEntry;
+    }
+    const id = this.osIds.get(n);
+    return id === null
+      ? null
+      : (info.entries.find(e => e.deviceId === id && e.mediaSource !== "browser") ?? null);
+  }
+
+  // The screen and window rows of a prompt, without Zen's own windows (P50).
+  // P70: a window seen as Zen's at any read of the prompt stays hidden, since
+  // Zen lists the request's windows again on every show. `remember` records
+  // this read's ids, and `zen-ids-unknown` once per prompt when they can't be
+  // read and the prompt lists a window; handles() records nothing.
+  capturesOf(info, remember) {
+    const n = info.notification;
+    const zen = this.m.windows.zenWindowIds(Services, this.zenIds.get(n) ?? null);
+    if (remember && zen.ok) {
+      this.zenIds.set(n, zen.ids);
+    }
+    if (
+      remember &&
+      !zen.ok &&
+      !this.idsUnknown.has(n) &&
+      info.entries.some(e => e.mediaSource === "window")
+    ) {
+      this.idsUnknown.add(n);
+      this.problem("zen-ids-unknown");
+    }
+    return this.m.captures.captureRows(info.entries, info.osEntry?.deviceId ?? null, zen);
+  }
+
+  // P52: a picker only for a prompt with a tab entry or a capture row.
+  offersRows(info, captures) {
+    return captures.rows.length > 0 || info.entries.some(e => e.mediaSource === "browser");
   }
 
   // P48: makes the panel a plain window and hides it before it shows, for a
@@ -481,7 +542,9 @@ class Picker {
       // onPrompt tries again, and records conceal-failed if it fails too.
       // The panel is a plain window by now, so its record of `nonnative`
       // stays: P64 (a) must not take it for a native one. Its sweep, or
-      // popuphidden, takes the record off.
+      // popuphidden, takes the record off. P67: the anchor is not quiet for
+      // a prompt that may show, so panel.js acts on it as in stock Zen.
+      this.m.conceal.releaseAnchor(win);
     }
   }
 
@@ -534,6 +597,7 @@ class Picker {
     const m = this.m;
     let info;
     let model;
+    let captures;
     const tabs = new Set();
     const browsers = new Map();
     try {
@@ -553,23 +617,14 @@ class Picker {
       if (this.declined.has(n) || this.sharing.has(n)) {
         return;
       }
-      // P17: the OS entry is the one Zen pre-selected when the prompt was
-      // first shown. Zen rebuilds the dropdown each time the prompt shows
-      // (WebRTCParent.sys.mjs listScreenShareDevices), so a later read
-      // finds that entry again by its deviceId, never by the selection.
-      if (!this.osIds.has(n)) {
-        this.osIds.set(n, info.osEntry ? info.osEntry.deviceId : null);
-      } else {
-        const id = this.osIds.get(n);
-        info = {
-          ...info,
-          osEntry:
-            id === null
-              ? null
-              : (info.entries.find(e => e.deviceId === id && e.mediaSource !== "browser") ??
-                null),
-        };
+      info = { ...info, osEntry: this.osEntryOf(info, true) };
+      captures = this.capturesOf(info, true);
+      if (!this.offersRows(info, captures)) {
+        // Nothing to offer: not a problem (SILENT).
+        return;
       }
+      // The port selects a screen or window only among these rows.
+      info.captures = captures.rows;
       const facts = m.tabs.tabFacts(info.entries, win, info.browser, Services);
       if (!facts.ok) {
         this.problem(facts.reason);
@@ -586,9 +641,13 @@ class Picker {
         facts.facts,
         m.tabs.hereOf(win),
         m.tabs.spaceNamesOf(win),
-        { available: !!info.osEntry }
+        { available: !!info.osEntry, macos: Services.appinfo.OS === "Darwin" },
+        captures.rows
       );
-      const ids = new Set(info.entries.map(e => e.deviceId));
+      // Tab entries only: a window's id can equal a tab's browserId.
+      const ids = new Set(
+        info.entries.filter(e => e.mediaSource === "browser").map(e => e.deviceId)
+      );
       for (const w of Services.wm.getEnumerator("navigator:browser")) {
         for (const t of tabsOf(w)) {
           const id = t.linkedPanel && t.linkedBrowser ? String(t.linkedBrowser.browserId) : null;
@@ -617,8 +676,12 @@ class Picker {
     };
     try {
       const tabRows = model.others.reduce((n, g) => n + g.rows.length, model.here.length);
+      const screens = captures.rows.filter(r => r.kind === "screen").length;
+      // Counts only: never a window's title.
       this.record(
-        `prompt ${info.entries.length} entries, ${tabRows} tabs, ${model.here.length} here`
+        `prompt ${info.entries.length} entries, ${tabRows} tabs, ${model.here.length} here, ` +
+          `${screens} screens, ${captures.rows.length - screens} windows, ` +
+          `${captures.hidden} hidden`
       );
       // P12: another space's hosts only once Tab revealed them.
       this.recordHosts(model.here);
@@ -636,6 +699,8 @@ class Picker {
         site: info.site,
         now: () => ChromeUtils.now(),
         delayMs,
+        livePreview: this.livePreview(),
+        accel: Services.appinfo.OS === "Darwin" ? "meta" : "ctrl",
       });
     } catch (e) {
       const code = e?.message;
@@ -686,6 +751,28 @@ class Picker {
     return session.win.gBrowser.selectedBrowser;
   }
 
+  // P51: the picker previews a window or screen live only where Zen's own
+  // prompt would: its previews pref on, and on macOS, screen capture not
+  // denied. The OS state is only read, never requested. False when unreadable.
+  livePreview() {
+    try {
+      if (!Services.prefs.getBoolPref(PREVIEWS_PREF, true)) {
+        return false;
+      }
+      if (Services.appinfo.OS === "Darwin") {
+        const os = Cc["@mozilla.org/ospermissionrequest;1"].getService(
+          Ci.nsIOSPermissionRequest
+        );
+        const state = {};
+        os.getScreenCapturePermissionState(state);
+        return state.value !== os.PERMISSION_STATE_DENIED;
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // security.notification_enable_delay, or the default when unreadable.
   enableDelay() {
     const fallback = this.m.config.TIMING.defaultDelayMs;
@@ -708,28 +795,18 @@ class Picker {
       this.record("share refused: not armed");
       return;
     }
-    const n = session.info.notification;
     if (effect.type === "cancel") {
       // P36: Esc and Cancel decline. Not a commit, so arming does not
       // gate it; the overlay already ignored a held or untrusted one.
       this.decline(session);
     } else if (effect.type === "share") {
-      this.share(session, { kind: "tab", deviceId: effect.deviceId });
+      // The port checks the kind against the entry (P19).
+      this.share(session, { kind: effect.kind, deviceId: effect.deviceId });
     } else if (effect.type === "os") {
+      // P52: the OS row exists only with an OS entry.
       const os = session.info.osEntry;
       if (os) {
         this.share(session, { kind: "os", deviceId: os.deviceId });
-        return;
-      }
-      // No OS entry to select: hand over to the stock dropdown.
-      session.done = true;
-      this.declined.add(n);
-      this.closeSession(session);
-      this.outcome("stock", null);
-      try {
-        session.win.document.getElementById(this.m.prompt.IDS.menulist)?.focus();
-      } catch {
-        // Focus stays where it is.
       }
     }
   }

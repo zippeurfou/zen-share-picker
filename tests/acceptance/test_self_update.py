@@ -257,7 +257,7 @@ def test_self_update(launch_zen, site, addon_xpi, tmp_path):
         # Positive control: the updated add-on does its job.
         setup(zen)
         p = wait_picker(zen)
-        assert p["groups"][-1] == "os", p
+        assert p["groups"] and "os" not in p["groups"], p
         assert p["focused"] == "zen-share-picker-search", p
         assert_prompt_concealed(zen)
         status = zen.addon_call(addon, "getStatus")

@@ -6,12 +6,13 @@ Zen lists only each window's active space in the prompt (P13), so a test
 that needs another space's rows opens a second window on that space (P14).
 """
 
+import re
 import sys
 import time
 
 import pytest
 from marionette_driver.addons import Addons
-from zen import CENTER_TOL_PX, SECONDARY_LABEL, ZenScriptError
+from zen import CENTER_TOL_PX, LIST_WINDOWS_PREFS, SECONDARY_LABEL, ZenScriptError
 
 SHARE_PAGE = "http://meet.test/share"
 DOCS = "http://docs.test/a"
@@ -82,9 +83,23 @@ def wait_picker(zen, pred=lambda p: True, what="the picker", timeout=2.0):
         time.sleep(0.05)
 
 
-def wait_gone(zen, timeout=2.0):
+def wait_picker_keys(zen, pred, what, timeout=2.0):
+    """Like wait_picker, through `Zen.picker_keys`: no text, so a timeout
+    message never carries a window title."""
     end = time.monotonic() + timeout
-    while picker(zen) is not None:
+    while True:
+        k = zen.picker_keys()
+        if k is not None and pred(k):
+            return k
+        if time.monotonic() > end:
+            raise AssertionError(f"timed out waiting for {what}: {k}")
+        time.sleep(0.05)
+
+
+def wait_gone(zen, timeout=2.0):
+    """Through `Zen.picker_keys`: no text, so no window title is read."""
+    end = time.monotonic() + timeout
+    while zen.picker_keys() is not None:
         if time.monotonic() > end:
             raise AssertionError("the picker did not close")
         time.sleep(0.05)
@@ -377,16 +392,25 @@ def wrap_append_item(zen, how):
     - "prefix-device-id": `deviceId` stores "x" + the value;
     - "numeric-media-source": `mediaSource` stores the value and reads 42;
     - "drop-tab-entries": an item whose `mediaSource` is set to "browser"
-      leaves the list, as when the prompt offers no tabs.
+      leaves the list, as when the prompt offers no tabs;
+    - "tabs-as-windows": every item set to "browser" but the first of each
+      build becomes a "window" with the same deviceId, so its label is a
+      test page's title (a fake window, on any platform);
+    - "only-windows": every item set to "browser" becomes a "window".
+
+    A fake window shares, through Zen's Allow, the tab behind it.
     """
     zen.chrome(
         """
         const how = args[0];
         const list = win.document.getElementById("webRTC-selectWindow-menulist");
         const orig = list.appendItem;
+        let browsers = 0;
         list.appendItem = function (...a) {
           const item = orig.apply(this, a);
           let stored;
+          // Each build starts with the "-1" placeholder.
+          if (a[1] == "-1") browsers = 0;
           if (how == "prefix-device-id") {
             Object.defineProperty(item, "deviceId", {
               configurable: true,
@@ -408,6 +432,17 @@ def wrap_append_item(zen, how):
                 if (v == "browser") item.remove();
               },
             });
+          } else if (how == "tabs-as-windows" || how == "only-windows") {
+            Object.defineProperty(item, "mediaSource", {
+              configurable: true,
+              get: () => stored,
+              set: v => {
+                if (v == "browser" && (how == "only-windows" || browsers++ > 0)) {
+                  v = "window";
+                }
+                stored = v;
+              },
+            });
           } else {
             throw new Error("unknown wrap " + how);
           }
@@ -415,6 +450,81 @@ def wrap_append_item(zen, how):
         };
         """,
         how,
+    )
+
+
+# A fake id for Zen's own windows where reading it throws (headless: no
+# native window). Then the add-on hides every window entry (P50), and a
+# fake window could never show. Every other windowUtils member still reads
+# the real one. Run again, it changes the fake id of the windows it wrapped.
+FAKE_ZEN_WINDOW_ID = 987654321
+
+READABLE_WINDOW_IDS = """
+for (const w of Services.wm.getEnumerator(null)) {
+  if (w.__zspZenId !== undefined) {
+    w.__zspZenId = args[0];
+    continue;
+  }
+  try {
+    w.windowUtils.webrtcRawDeviceId;
+    continue;
+  } catch (e) {}
+  const real = w.windowUtils;
+  // A plain target: the real one's own properties are not configurable,
+  // so a proxy of it may not answer differently.
+  const utils = new Proxy({}, {
+    get(_t, k) {
+      if (k === "webrtcRawDeviceId") return w.__zspZenId;
+      const v = Reflect.get(real, k);
+      return typeof v == "function" ? v.bind(real) : v;
+    },
+    set(_t, k, v) {
+      return Reflect.set(real, k, v);
+    },
+    has(_t, k) {
+      return k in real;
+    },
+  });
+  w.__zspZenId = args[0];
+  Object.defineProperty(w, "windowUtils", { configurable: true, get: () => utils });
+}
+"""
+
+# Previews off: neither the picker nor Zen's own command handler starts a
+# capture when a fake row is highlighted or selected.
+NO_PREVIEWS = {"media.getdisplaymedia.previews.enabled": False}
+
+# Live video tracks of every <webrtc-preview> in the window, Zen's and the
+# picker's. Read only; nothing is copied.
+LIVE_PREVIEW_TRACKS = """
+return Array.from(win.document.querySelectorAll("webrtc-preview"))
+  .flatMap(el => el.videoEl?.srcObject?.getVideoTracks() ?? [])
+  .filter(t => t.readyState == "live").length;
+"""
+
+# MediaManagerVideo permissions really stored (the system principal reads
+# as allowed whatever is stored).
+STORED_PREVIEW_PERMISSIONS = """
+return Services.perms.all.filter(p => p.type == "MediaManagerVideo").length;
+"""
+
+
+def fake_windows(launch_zen, addon_xpi, how, prefs=NO_PREVIEWS):
+    """A Zen with previews off, the add-on active, two test tabs, Zen's
+    window ids readable, and the dropdown wrapped with `how`."""
+    zen = launch_zen(prefs)
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    zen.chrome(READABLE_WINDOW_IDS, FAKE_ZEN_WINDOW_ID)
+    zen.visit(DOCS)
+    zen.visit(WIKI)
+    wrap_append_item(zen, how)
+    return zen, addon
+
+
+def has_windows_tab(zen):
+    return zen.chrome(
+        'return !!win.document.getElementById("zen-share-picker-tab-windows");'
     )
 
 
@@ -449,10 +559,10 @@ def skip_if_capture_denied(zen):
 def test_picker_opens_for_a_screen_share(zen, site, addon):
     setup(zen)
     p = wait_picker(zen)
-    expected = [key_of(zen, WIKI), key_of(zen, DOCS), key_of(zen, SHARE_PAGE), "os"]
+    expected = [key_of(zen, WIKI), key_of(zen, DOCS), key_of(zen, SHARE_PAGE)]
     assert p["keys"] == expected, p
     assert p["selected"] == key_of(zen, WIKI), p
-    assert p["groups"][-1] == "os", p
+    assert "os" not in p["groups"], p
     assert p["focused"] == "zen-share-picker-search", p
     assert p["header"] == "meet.test wants to see your screen", p
     assert_prompt_concealed(zen)
@@ -542,7 +652,7 @@ def test_typing_never_reveals_other_spaces(zen, site, addon):
     p = wait_picker(zen, lambda p: "no-match" in p["hints"], "the no-match hint")
     assert p["hints"]["no-match"] == NO_MATCH, p
     assert "mail.test" not in p["text"], p
-    assert p["keys"] == ["os"], p
+    assert p["keys"] == [], p
 
 
 # -- sharing ------------------------------------------------------------------
@@ -677,7 +787,7 @@ def test_addon_refuses_an_unarmed_share(launch_zen, site, addon_xpi):
         const p = api._picker;
         const session = p.sessions.get(win);
         if (!session) throw new Error("no session");
-        p.onEffect(session, { type: "share", deviceId: args[1] });
+        p.onEffect(session, { type: "share", kind: "tab", deviceId: args[1] });
         p.onEffect(session, { type: "os" });
         """,
         addon,
@@ -1363,6 +1473,19 @@ def test_a_handled_prompt_is_hidden_from_its_first_frame(zen, site, addon, as_na
     assert_not_concealed(zen)
 
 
+def test_a_windows_only_prompt_is_hidden_from_its_first_frame(
+    launch_zen, site, addon_xpi
+):
+    """P48 with P52: a prompt that lists windows but no tab is one the
+    picker takes, so its panel is hidden from its first frame too."""
+    zen, _addon = fake_windows(launch_zen, addon_xpi, "only-windows")
+    watch_first_frame(zen)
+    zen.request_share()
+    wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    assert_hidden_from_the_first_frame(first_frame(zen), expected_mark(zen))
+    assert_prompt_concealed(zen)
+
+
 @pytest.mark.parametrize("as_native", [False, True], ids=["gecko-nonnative", "native"])
 def test_turning_off_restores_only_the_addons_nonnative(zen, site, addon, as_native):
     """P48: the off switch removes the add-on's `nonnative` and its record,
@@ -1556,6 +1679,42 @@ def test_a_revealed_prompt_slides_the_sidebar_out(launch_zen, site, addon_xpi, h
     )
     got = wait_sidebar(zen, {"active": False, "open": False, "urlbar": False})
     assert got["open"] is False and got["urlbar"] is False, got
+
+
+# Makes the add-on's revealPanel do nothing, in its module table, so only
+# the early hide's own failure path can take off the quiet anchor.
+NO_REVEAL_PANEL = """
+const { ExtensionParent } = ChromeUtils.importESModule(
+  "resource://gre/modules/ExtensionParent.sys.mjs");
+const extension = ExtensionParent.GlobalManager.getExtension(args[0]);
+const api = extension.apiManager.getAPI("sharePicker", extension, "addon_parent");
+const m = api._picker.m;
+m.conceal = { ...m.conceal, revealPanel() {} };
+"""
+
+
+def test_a_failed_early_hide_leaves_no_quiet_anchor(launch_zen, site, addon_xpi):
+    """P67: when the early hide fails after it quieted the anchor, it takes
+    its no-open-on-anchor off at once, so the prompt shows as in stock Zen,
+    with the sidebar out, whatever happens next."""
+    zen, addon = compact_zen(launch_zen, addon_xpi)
+    spaces(zen)
+    zen.chrome(NO_REVEAL_PANEL, addon)
+    zen.chrome(
+        """
+        win.document.documentElement.append = () => {
+          throw new Error("test: no append");
+        };
+        """
+    )
+    zen.request_share()
+    assert_no_picker_for(zen, 2)
+    assert "conceal-failed" in status(zen, addon)["promptProblems"]
+    got = sidebar(zen)
+    assert (got["mark"], got["noOpen"]) == (None, False), got
+    want = {"active": True, "open": True, "urlbar": True}
+    got = wait_sidebar(zen, want)
+    assert got == want, got
 
 
 def test_a_prompt_already_shown_natively_gets_no_picker(zen, site, addon):
@@ -1857,7 +2016,60 @@ def test_no_tab_entries_means_no_picker(zen, site, addon):
     assert entries and not any(e["mediaSource"] == "browser" for e in entries), entries
     assert_no_picker_for(zen, 2)
     assert_prompt_untouched(zen)
+    assert_not_concealed(zen)
     assert status(zen, addon)["promptProblems"] == []
+
+
+def test_windows_only_prompt_opens_the_picker_on_windows(launch_zen, site, addon_xpi):
+    """P52: a prompt that lists windows but no tab opens the picker on its
+    Windows tab, with nothing highlighted and nothing captured."""
+    zen, addon = fake_windows(launch_zen, addon_xpi, "only-windows")
+    zen.request_share()
+    assert zen.stock_counts().get("browser", 0) == 0
+    fake = ["window:" + i for i in zen.stock_ids("window")]
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    assert fake and k["keys"][: len(fake)] == fake, k
+    assert k["selected"] is None, k
+    assert_prompt_concealed(zen)
+    assert zen.chrome(LIVE_PREVIEW_TRACKS) == 0
+    assert zen.chrome(STORED_PREVIEW_PERMISSIONS) == 0
+    assert status(zen, addon)["promptProblems"] == []
+
+
+def test_unreadable_zen_window_ids_hide_every_window(launch_zen, site, addon_xpi):
+    """P50: where Zen's own window ids cannot be read (headless here), every
+    window entry is hidden. A prompt left with no tab and no capture row
+    gets no picker and nothing hidden. The code `zen-ids-unknown` says why,
+    once per prompt, also when the prompt shows again."""
+    zen = launch_zen(NO_PREVIEWS)
+    try:
+        zen.zen_window_ids()
+    except ZenScriptError:
+        pass
+    else:
+        pytest.skip("Zen's window ids read fine here (headful)")
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    zen.visit(DOCS)
+    wrap_append_item(zen, "only-windows")
+    watch_first_frame(zen, True)
+    zen.request_share()
+    assert zen.stock_counts().get("window", 0) >= 1
+    assert_not_hidden_at_first_frame(zen)
+    assert_no_picker_for(zen, 2)
+    assert_prompt_untouched(zen)
+    assert status(zen, addon)["promptProblems"] == ["zen-ids-unknown"]
+    zen.chrome("win.gBrowser.selectedTab = findTab(args[0]);", DOCS)
+    zen.chrome("win.gBrowser.selectedTab = findTab(args[0]);", SHARE_PAGE)
+    zen.chrome(
+        """
+        await waitFor(() => win.PopupNotifications.panel.state == "open",
+                      "the prompt to show again");
+        """
+    )
+    assert_no_picker_for(zen, 2)
+    assert_not_concealed(zen)
+    assert status(zen, addon)["promptProblems"] == ["zen-ids-unknown"]
 
 
 def test_camera_request_opens_no_picker(launch_zen, site, addon_xpi):
@@ -1930,22 +2142,323 @@ def test_os_row_selects_the_os_entry(zen, site, addon):
         """
     )
     wait_picker(zen)
+    if os_entry is None:
+        # P52: no OS entry, no OS row, and here no Windows tab at all.
+        assert not has_windows_tab(zen)
+        zen.chord("2")
+        time.sleep(0.5)
+        assert zen.picker_keys()["view"] == "tabs"
+        assert allow_clicks(zen) == 0
+        assert status(zen, addon)["lastOutcome"] is None
+        return
+    zen.chord("2")
+    wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
     zen.press("End")
-    wait_picker(zen, lambda p: p["selected"] == "os", "the OS row")
+    wait_picker_keys(zen, lambda k: k["selected"] == "os", "the OS row")
     zen.wait_picker_armed()
     zen.press("Enter")
     wait_gone(zen)
-    if os_entry is not None:
-        s = wait_status(
-            zen, addon, lambda s: s["lastOutcome"] is not None, "an outcome", 10
-        )
-        assert zen.stock_selected() == os_entry, s
-        assert allow_clicks(zen) >= 1, s
-    else:
-        time.sleep(1)
-        assert allow_clicks(zen) == 0
-        assert status(zen, addon)["lastOutcome"] == "stock"
+    s = wait_status(
+        zen, addon, lambda s: s["lastOutcome"] is not None, "an outcome", 10
+    )
+    assert zen.stock_selected() == os_entry, s
+    assert allow_clicks(zen) >= 1, s
     assert_prompt_untouched(zen)
+
+
+def test_enter_on_a_fake_window_selects_it_and_clicks_allow_once(
+    launch_zen, site, addon_xpi
+):
+    """A window row shares through the real Allow, once, after Accel+2, an
+    arrow and an armed Enter. The stream Zen starts is the tab behind the
+    fake window item, so the check by kind finds no window: unverified."""
+    zen, addon = fake_windows(launch_zen, addon_xpi, "tabs-as-windows")
+    skip_if_capture_denied(zen)
+    zen.request_share()
+    count_allow(zen)
+    fake = zen.stock_ids("window")
+    assert fake, zen.stock_counts()
+    wait_picker_keys(zen, lambda k: k["view"] == "tabs", "the Tabs view")
+    zen.chord("2")
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    # The first row must be a fake window: never arrow onto a real one.
+    assert k["keys"][0] == "window:" + fake[0], k
+    zen.press("ArrowDown")
+    wait_picker_keys(
+        zen, lambda k: k["selected"] == "window:" + fake[0], "the fake window"
+    )
+    assert zen.chrome("return win.__allowSeen;") == 0
+    zen.wait_picker_armed()
+    zen.press("Enter")
+    wait_gone(zen)
+    s = wait_status(
+        zen, addon, lambda s: s["lastOutcome"] is not None, "an outcome", 10
+    )
+    assert s["lastOutcome"] == "unverified", s
+    assert zen.stock_selected() == fake[0]
+    assert zen.chrome("return win.__allowSeen;") == 1
+    assert_not_concealed(zen)
+
+
+COUNTS_LINE = re.compile(
+    r"prompt (\d+) entries, (\d+) tabs, (\d+) here, (\d+) screens, (\d+) windows, (\d+) hidden"
+)
+
+
+def counts_line(log):
+    """The groups of the log's one counts line, as ints; fails otherwise."""
+    counts = [COUNTS_LINE.fullmatch(line) for line in log if line.startswith("prompt ")]
+    assert len(counts) == 1 and counts[0], log
+    return tuple(map(int, counts[0].groups()))
+
+
+def assert_only_fake_windows(zen, urls):
+    """The prompt lists no screen but its pre-selected OS entry, and only
+    windows whose ids are the browserIds of the test's own tabs on `urls`
+    (fake windows). Call it before anything is selected. Checked through
+    ids alone, before any label is read; the messages hold counts only,
+    never a label."""
+    fake = {zen.browser_id(url) for url in urls}
+    os_entry = zen.stock_selected()
+    screens = len([i for i in zen.stock_ids("screen") if i != os_entry])
+    others = len([i for i in zen.stock_ids("window") if i not in fake])
+    assert screens == 0, f"{screens} real screens listed"
+    assert others == 0, f"{others} real windows listed"
+
+
+def test_debug_log_holds_no_window_title(launch_zen, site, addon_xpi):
+    """Window titles never reach the debug log; it gets counts. The test
+    reads labels only once it knows every listed window is a fake one, and
+    never puts a label in an assertion message."""
+    zen, addon = fake_windows(launch_zen, addon_xpi, "tabs-as-windows")
+    zen.addon_call(addon, "setDebug", True)
+    zen.request_share()
+    wait_picker_keys(zen, lambda k: k["view"] == "tabs", "the Tabs view")
+    # Before any arrow press in the Windows tab, which could highlight a
+    # real window.
+    assert_only_fake_windows(zen, [SHARE_PAGE, DOCS, WIKI])
+    zen.chord("2")
+    wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    zen.press("ArrowDown")
+    wait_picker_keys(zen, lambda k: k["selected"] is not None, "a highlight")
+    labels = [e["label"] for e in zen.stock_entries() if e["mediaSource"] == "window"]
+    named = len(labels) > 0 and all(labels)
+    assert named, f"{len(labels)} fake windows, some without a label"
+    log = zen.addon_call(addon, "getLog")
+    leaked = len([line for line in log if any(label in line for label in labels)])
+    assert leaked == 0, f"{leaked} log lines hold a window title"
+    entries, tabs, _here, screens, windows, hidden = counts_line(log)
+    assert (tabs, screens, windows, hidden) == (1, 0, len(labels), 0), log
+    assert entries == sum(
+        n for source, n in zen.stock_counts().items() if source != "placeholder"
+    ), log
+
+
+def test_a_zen_window_entry_is_hidden_and_never_selected(launch_zen, site, addon_xpi):
+    """P50, headless: one fake window's id reads as Zen's own window's. Its
+    row is not in the picker, the counts line says 1 hidden, and Enter on a
+    remaining row selects that listed entry, never the hidden one. Allow is
+    blocked, so nothing is captured."""
+    zen = launch_zen(NO_PREVIEWS)
+    try:
+        zen.zen_window_ids()
+    except ZenScriptError:
+        pass
+    else:
+        pytest.skip("Zen's window ids read fine here (headful)")
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    zen.addon_call(addon, "setDebug", True)
+    zen.visit(DOCS)
+    zen.visit(WIKI)
+    own = zen.browser_id(DOCS)
+    zen.chrome(READABLE_WINDOW_IDS, own)
+    assert zen.zen_window_ids() == [own]
+    wrap_append_item(zen, "only-windows")
+    zen.request_share()
+    block_allow(zen)
+    ids = zen.stock_ids("window")
+    assert own in ids and len(ids) >= 2, ids
+    listed = ["window:" + i for i in ids if i != own]
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    assert "window:" + own not in k["keys"], k
+    assert k["keys"][: len(listed)] == listed, k
+    _entries, _tabs, _here, screens, windows, hidden = counts_line(
+        zen.addon_call(addon, "getLog")
+    )
+    assert (screens, windows, hidden) == (0, len(listed), 1)
+    zen.press("ArrowDown")
+    wait_picker_keys(zen, lambda k: k["selected"] == listed[0], "the first listed row")
+    zen.wait_picker_armed()
+    zen.press("Enter")
+    wait_gone(zen)
+    wait_status(zen, addon, lambda s: s["lastOutcome"] is not None, "an outcome", 10)
+    assert "window:" + zen.stock_selected() == listed[0]
+    assert allow_clicks(zen) >= 1
+    assert zen.chrome(LIVE_PREVIEW_TRACKS) == 0
+
+
+def test_a_zen_window_seen_once_stays_hidden_when_the_prompt_shows_again(
+    launch_zen, site, addon_xpi
+):
+    """P70: Zen builds the dropdown from the request's list each time the
+    prompt shows, so a Zen window closed meanwhile is still an entry. A
+    fake window read as Zen's own at the first show stays hidden when the
+    prompt shows again after its id stopped reading as Zen's."""
+    zen = launch_zen(NO_PREVIEWS)
+    try:
+        zen.zen_window_ids()
+    except ZenScriptError:
+        pass
+    else:
+        pytest.skip("Zen's window ids read fine here (headful)")
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    zen.visit(DOCS)
+    zen.visit(WIKI)
+    own = zen.browser_id(DOCS)
+    zen.chrome(READABLE_WINDOW_IDS, own)
+    wrap_append_item(zen, "only-windows")
+    zen.request_share()
+    ids = zen.stock_ids("window")
+    assert own in ids and len(ids) >= 2, ids
+    listed = ["window:" + i for i in ids if i != own]
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    assert "window:" + own not in k["keys"], k
+    zen.chrome(READABLE_WINDOW_IDS, FAKE_ZEN_WINDOW_ID)
+    assert zen.zen_window_ids() == [str(FAKE_ZEN_WINDOW_ID)]
+    zen.chrome("win.gBrowser.selectedTab = findTab(args[0]);", DOCS)
+    wait_gone(zen)
+    zen.chrome("win.gBrowser.selectedTab = findTab(args[0]);", SHARE_PAGE)
+    zen.chrome(
+        """
+        await waitFor(() => win.PopupNotifications.panel.state == "open",
+                      "the prompt to show again");
+        """
+    )
+    assert own in zen.stock_ids("window")
+    k = wait_picker_keys(
+        zen, lambda k: k["view"] == "windows", "a picker on the shown prompt", timeout=5
+    )
+    assert "window:" + own not in k["keys"], k
+    assert k["keys"][: len(listed)] == listed, k
+    assert status(zen, addon)["promptProblems"] == []
+
+
+# Wraps the overlay's openPicker in the add-on's module table, so a test
+# can ask the picker's tab map (`browserFor`) what it holds. Every other
+# export is the real module's.
+KEEP_BROWSER_FOR = """
+const { ExtensionParent } = ChromeUtils.importESModule(
+  "resource://gre/modules/ExtensionParent.sys.mjs");
+const extension = ExtensionParent.GlobalManager.getExtension(args[0]);
+const api = extension.apiManager.getAPI("sharePicker", extension, "addon_parent");
+const m = api._picker.m;
+const real = m.overlay;
+m.overlay = {
+  ...real,
+  openPicker(w, model, opts) {
+    w.__browserFor = opts.browserFor;
+    return real.openPicker(w, model, opts);
+  },
+};
+"""
+
+TAB_MAP = """
+const [id, ids] = args;
+const { ExtensionParent } = ChromeUtils.importESModule(
+  "resource://gre/modules/ExtensionParent.sys.mjs");
+const extension = ExtensionParent.GlobalManager.getExtension(id);
+const api = extension.apiManager.getAPI("sharePicker", extension, "addon_parent");
+const session = api._picker.sessions.get(win);
+return {
+  tabs: Array.from(session.tabs, t => String(t.linkedBrowser.browserId)).sort(),
+  browsers: ids.filter(i => !!win.__browserFor(i)).sort(),
+};
+"""
+
+
+def test_the_tab_map_holds_tab_entries_only(launch_zen, site, addon_xpi):
+    """A window entry whose id equals a tab's browserId (a fake window over
+    that tab) leaves the tab out of the session's tabs and out of the
+    picker's browser map: the tab map is built from tab entries only."""
+    zen, addon = fake_windows(launch_zen, addon_xpi, "tabs-as-windows")
+    zen.chrome(KEEP_BROWSER_FOR, addon)
+    zen.request_share()
+    wait_picker_keys(zen, lambda k: k["view"] == "tabs", "the Tabs view")
+    tab_ids = zen.stock_ids("browser")
+    window_ids = zen.stock_ids("window")
+    all_ids = sorted({zen.browser_id(url) for url in (SHARE_PAGE, DOCS, WIKI)})
+    assert tab_ids and window_ids, zen.stock_counts()
+    # Every window id is the browserId of one of the test's tabs.
+    assert set(window_ids) <= set(all_ids), (window_ids, all_ids)
+    got = zen.chrome(TAB_MAP, addon, all_ids)
+    assert got == {"tabs": sorted(tab_ids), "browsers": sorted(tab_ids)}, got
+
+
+# -- real windows (macOS, Apple's picker off) -------------------------------------
+# These read the picker and the prompt only as keys, ids and counts, never
+# press an arrow, and keep previews off.
+
+
+def real_windows_zen(launch_zen, addon_xpi):
+    if sys.platform != "darwin":
+        pytest.skip("only macOS lists windows here")
+    zen = launch_zen(LIST_WINDOWS_PREFS)
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    return zen, addon
+
+
+def test_real_window_rows_are_listed_without_capture(launch_zen, site, addon_xpi):
+    """The Windows tab lists Zen's screens, then its windows, minus Zen's
+    own (P50, all of them when Zen's ids cannot be read, as headless),
+    and nothing is captured."""
+    zen, _addon = real_windows_zen(launch_zen, addon_xpi)
+    zen.visit(DOCS)
+    zen.request_share()
+    counts = zen.stock_counts()
+    if counts.get("screen", 0) == 0:
+        pytest.skip("Zen listed no screen here")
+    wait_picker_keys(zen, lambda k: k["view"] == "tabs", "the Tabs view")
+    zen.chord("2")
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    window_ids = zen.stock_ids("window")
+    try:
+        hidden = len(set(zen.zen_window_ids()) & set(window_ids))
+    except ZenScriptError:
+        hidden = len(window_ids)
+    captures = [key for key, group in zip(k["keys"], k["groups"]) if group == "capture"]
+    assert len(captures) == counts["screen"] + len(window_ids) - hidden, k
+    assert captures[0].startswith("screen:"), k
+    assert k["selected"] is None, k
+    assert zen.chrome(LIVE_PREVIEW_TRACKS) == 0
+
+
+def test_zen_windows_are_never_listed(launch_zen, site, addon_xpi):
+    """P50, headful: with a second Zen window open, no window row is one of
+    Zen's own windows, and at least one of them is in Zen's list (so the
+    ids compare)."""
+    zen, _addon = real_windows_zen(launch_zen, addon_xpi)
+    if zen.headless:
+        pytest.skip("headful only: Zen's own windows exist only headful")
+    first = zen.window
+    zen.open_window()
+    zen.visit(WIKI)
+    zen.use_window(first)
+    zen.visit(DOCS)
+    zen.settle()
+    headful_share(zen)
+    wait_picker_keys(zen, lambda k: k["view"] == "tabs", "the Tabs view")
+    zen.chord("2")
+    k = wait_picker_keys(zen, lambda k: k["view"] == "windows", "the Windows view")
+    zen_ids = zen.zen_window_ids()
+    assert set(zen_ids) & set(zen.stock_ids("window")), (
+        "no Zen window id is in the list"
+    )
+    assert [
+        key for key in k["keys"] if key in {"window:" + i for i in zen_ids}
+    ] == [], k
 
 
 def test_rejected_allow_leaves_the_choice_selected(zen, site, addon):

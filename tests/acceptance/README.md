@@ -58,6 +58,26 @@ Skips, and why:
   Grant Zen screen recording in System Settings to run them.
 - `test_stock_share_flow` skips with "window could not become active" when
   the test window never becomes the active window.
+- `test_zen_windows_match_window_entries` runs only headful on macOS, where
+  Zen lists windows (`zen.LIST_WINDOWS_PREFS`). It skips headless, off macOS,
+  and with "the window could not become active (screen locked?)". It lists
+  your open windows but returns only counts and ids, and never previews one.
+- `test_real_window_rows_are_listed_without_capture` and
+  `test_zen_windows_are_never_listed` run only on macOS with
+  `zen.LIST_WINDOWS_PREFS`. They read the picker through `picker_keys()`
+  (keys, ids and counts, never a title), never press an arrow, and keep
+  previews off. The first skips with "Zen listed no screen here"; the
+  second runs only headful (Zen's own window ids can't be read headless)
+  and skips with "the window could not become active (screen locked?)".
+- The fake-window tests (`wrap_append_item` with "tabs-as-windows" or
+  "only-windows") turn tab items into window items, keep previews off, and
+  give Zen's window a readable fake id where reading it throws
+  (`READABLE_WINDOW_IDS`). `test_unreadable_zen_window_ids_hide_every_window`
+  skips where the real ids read fine (headful), and so does
+  `test_a_zen_window_entry_is_hidden_and_never_selected`, which makes one
+  fake window's id read as Zen's own. `test_debug_log_holds_no_window_title`
+  checks that every listed window is a fake one, by id, before it reads a
+  label.
 - `test_port_select_checks_the_target_kind` skips its operating-system half
   where the prompt has no screen or window entry (headless Linux).
 - `test_focus_never_rests_in_the_hidden_panel` and
@@ -80,6 +100,33 @@ Skips, and why:
   container the hidden panel has a computed opacity of 0, as on macOS. Off
   macOS, Zen fades its panel's opacity, so the hiding checks wait up to a
   second for it.
+
+## Capture tests (opt-in)
+
+`test_capture.py` previews and shares a real window and the screen: the
+picker's live preview follows the highlight, and Enter shares a window or
+the screen. On macOS any such capture makes the system raise an alert on
+your screen, so these tests are off by default. Every test there skips
+with "captures a window or the screen, which raises a macOS alert: set
+ZSP_CAPTURE_TESTS=1 with the owner present" unless that variable is set,
+skips headless ("needs real windows, run headful") and off macOS, and skips
+when macOS denies Zen screen capture or the window can't become active
+(screen locked?). No Zen starts for the first three skips; the last two
+come from a running test Zen, before any capture.
+
+Run them only with the machine's owner present, to answer the alert:
+
+```sh
+ZSP_CAPTURE_TESTS=1 MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 uv run --project tests/acceptance pytest tests/acceptance/test_capture.py -rP
+```
+
+- The window tests start a second test Zen on `http://docs.test/a` and
+  share or preview that window only. They reach it by clicking its row's
+  key, and the screen with Home; nothing arrows across your other windows.
+- They read the picker through `picker_keys()` (keys, never a title) and
+  print `CAPTURE` lines with times, counts and booleans only. No frame is
+  saved or copied.
+- Each first-frame wait is 60 s, time enough to answer the alert.
 
 `uv.lock` is not committed: uv writes the URL of whatever package index the
 machine is configured with into it. Set `UV_NO_CONFIG=1` to resolve from
@@ -115,11 +162,11 @@ tests, then publishes exactly one XPI plus `updates.json`
 
 On headless Linux the share prompt lists only tabs, after its "Select window
 or screen" placeholder: no screen, no window, and no pre-selected
-operating-system entry. The picker's OS row then takes the stock path (close
-the picker, leave the dropdown to the user), and
-`test_port_select_checks_the_target_kind` skips its half that needs a screen
-or window entry. Pressing Allow needs no screen-capture permission there, so
-the share tests run.
+operating-system entry. The picker then has no Windows tab, the real-window
+tests skip with "only macOS lists windows here", the fake-window tests run,
+and `test_port_select_checks_the_target_kind` skips its half that needs a
+screen or window entry. Pressing Allow needs no screen-capture permission
+there, so the share tests run.
 
 ## Self-update
 
@@ -193,6 +240,9 @@ channel is https and needs no pref change.
 | `stock_prompt_open() -> bool` | Whether the selected tab's share prompt is open. |
 | `stock_entries() -> list[dict]` | The prompt's dropdown items as `{label, mediaSource, deviceId}`; the placeholder has `None` for both. |
 | `stock_selected() -> str \| None` | The selected item's `deviceId`; `None` for the placeholder. |
+| `stock_counts() -> dict[str, int]` | How many of the prompt's items have each `mediaSource`; the placeholder counts as `"placeholder"`. No labels. |
+| `stock_ids(source) -> list[str]` | The `deviceId`s of the prompt's items with that `mediaSource`, in order. No labels. |
+| `zen_window_ids() -> list[str]` | `String(windowUtils.webrtcRawDeviceId)` of every top-level Zen window, the id the prompt's window entries carry. Raises if a read throws. |
 | `browser_id(url) -> str`, `page_title(url) -> str` | The browser id and page title of the first tab on `url`, this window first. |
 | `sharing_device_ids() -> list[str]` | The rawIds of the `browser` devices of every active stream. |
 | `screen_capture_denied() -> bool` | Whether macOS denies Zen screen capture (pressing Allow would raise a macOS dialog). Always `False` off macOS. |

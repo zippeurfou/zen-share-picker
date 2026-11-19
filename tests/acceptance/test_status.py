@@ -27,11 +27,16 @@ from test_picker import (
 )
 from zen import CONFIG
 
-ENABLED_LABEL = "Show the tab picker on share prompts (resets when Zen restarts)"
+ENABLED_LABEL = (
+    "Show the tab, window and screen picker on share prompts (resets when Zen restarts)"
+)
 DEBUG_LABEL = "Log picker decisions (resets when Zen restarts)"
 LOG_LIMIT = 2000
 SECRET = "Secret Title 123"
-PROMPT_LINE = re.compile(r"prompt (\d+) entries, (\d+) tabs, (\d+) here")
+PROMPT_LINE = re.compile(
+    r"prompt (\d+) entries, (\d+) tabs, (\d+) here, "
+    r"(\d+) screens, (\d+) windows, (\d+) hidden"
+)
 
 
 def share_mode() -> str:
@@ -66,7 +71,7 @@ def test_options_page_shows_status(zen, addon):
         page.wait(
             "return document.getElementById('state').textContent == 'active';", "active"
         )
-        assert page.text("#version") == "0.1.0"
+        assert page.text("#version") == "0.2.0"
         assert page.text("#share-mode") == share_mode()
         assert page.text("#preview-mode") != ""
         assert page.eval("return document.getElementById('failed-box').hidden;") is True

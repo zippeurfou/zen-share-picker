@@ -55,6 +55,14 @@ ADDON_PREFS: dict[str, Any] = {
     "extensions.experiments.enabled": True,
 }
 
+# Zen's prompt lists the screens and windows itself, as with the installer's
+# --list-windows. The pref takes effect at startup only. Previews off, so
+# listing never starts a capture.
+LIST_WINDOWS_PREFS: dict[str, Any] = {
+    "media.getdisplaymedia.screencapturekit.picker.enabled": False,
+    "media.getdisplaymedia.previews.enabled": False,
+}
+
 # Quiet, deterministic startup in a throwaway profile.
 BASE_PREFS: dict[str, Any] = {
     "marionette.port": 0,  # pick a free port, written to MarionetteActivePort
@@ -640,6 +648,16 @@ class Zen:
         seq.perform()
         self.client.actions.release()
 
+    def chord(self, key: str) -> None:
+        """Press Accel+`key` as WebDriver key actions: Meta on macOS,
+        Control elsewhere (`Services.appinfo.OS`)."""
+        assert self.client is not None
+        darwin = self.chrome('return Services.appinfo.OS == "Darwin";')
+        mod = Keys.META if darwin else Keys.CONTROL
+        seq = self.client.actions.sequence("key", "keyboard")
+        seq.key_down(mod).key_down(key).key_up(key).key_up(mod).perform()
+        self.client.actions.release()
+
     def type_text(self, text: str) -> None:
         """Type `text` into the focused chrome element, one key per character."""
         self.press(*text)
@@ -1022,6 +1040,105 @@ class Zen:
               }));
             """
         )
+
+    def stock_counts(self) -> dict[str, int]:
+        """How many of the prompt's dropdown items have each `mediaSource`;
+        the "-1" item counts as `"placeholder"`. No labels."""
+        return self.chrome(
+            """
+            const popup = win.document.getElementById("webRTC-selectWindow-menupopup");
+            const counts = {};
+            for (const i of popup.children) {
+              if (i.localName != "menuitem") continue;
+              const key = i.value == "-1" ? "placeholder" : String(i.mediaSource);
+              counts[key] = (counts[key] ?? 0) + 1;
+            }
+            return counts;
+            """
+        )
+
+    def stock_ids(self, source: str) -> list[str]:
+        """The `deviceId`s of the prompt's items whose `mediaSource` is
+        `source`, in order. No labels."""
+        return self.chrome(
+            """
+            const popup = win.document.getElementById("webRTC-selectWindow-menupopup");
+            return Array.from(popup.children)
+              .filter(i => i.localName == "menuitem" && i.mediaSource == args[0])
+              .map(i => String(i.deviceId));
+            """,
+            source,
+        )
+
+    def zen_window_ids(self) -> list[str]:
+        """`String(windowUtils.webrtcRawDeviceId)` of every top-level Zen
+        window, as the prompt's window entries carry them. Raises
+        `ZenScriptError` if any read throws."""
+        return self.chrome(
+            """
+            return Array.from(Services.wm.getEnumerator(null),
+                              w => String(w.windowUtils.webrtcRawDeviceId));
+            """
+        )
+
+    def picker_keys(self) -> dict[str, Any] | None:
+        """The open picker as `{keys, groups, selected, view, count}`, or
+        None when none is open. Never any text: a test that lists real
+        windows reads the picker only through this, so no window title
+        reaches its output."""
+        return self.chrome(
+            """
+            const root = win.document.getElementById("zen-share-picker");
+            if (!root) return null;
+            const rows = Array.from(root.querySelectorAll(".zsp-row"));
+            const sel = rows.find(r => r.getAttribute("aria-selected") == "true");
+            return {
+              keys: rows.map(r => r.dataset.key),
+              groups: rows.map(r => r.dataset.group),
+              selected: sel ? sel.dataset.key : null,
+              view: root.dataset.view ?? null,
+              count: rows.length,
+            };
+            """
+        )
+
+    def live_tracks(self) -> int:
+        """Live video tracks across every `<webrtc-preview>` in the selected
+        window, the picker's and Zen's own. Reads track states only: no
+        frame is copied."""
+        return self.chrome(
+            """
+            return Array.from(win.document.querySelectorAll("webrtc-preview"))
+              .flatMap(el => el.videoEl?.srcObject?.getVideoTracks() ?? [])
+              .filter(t => t.readyState == "live").length;
+            """
+        )
+
+    def click_row(self, key: str) -> None:
+        """A WebDriver click on the centre of the picker's row whose
+        `data-key` is `key`. The row is found by key alone, so a test reaches
+        a real window without arrowing across the others. Raises
+        `ZenScriptError`, before any click, when the element at that point is
+        not in the row."""
+        x, y = self.chrome(
+            """
+            const root = win.document.getElementById("zen-share-picker");
+            const row = Array.from(root?.querySelectorAll(".zsp-row") ?? [])
+              .find(r => r.dataset.key == args[0]);
+            if (!row) throw new Error("no picker row with that key");
+            row.scrollIntoView({ block: "nearest" });
+            const r = row.getBoundingClientRect();
+            const x = r.left + r.width / 2;
+            const y = r.top + r.height / 2;
+            const hit = win.document.elementFromPoint(x, y);
+            if (!hit || !row.contains(hit)) {
+              throw new Error("the click point is not on that row");
+            }
+            return [x, y];
+            """,
+            key,
+        )
+        self._click(x, y)
 
     def stock_selected(self) -> str | None:
         """The `deviceId` of the prompt's selected item; None for the

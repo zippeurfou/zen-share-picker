@@ -119,6 +119,84 @@ def test_read_prompt_maps_every_tab_entry(zen, site, addon):
     assert got["names"][perso] == "Perso"
 
 
+def test_read_prompt_labels_entries(zen, site, addon):
+    """Each entry carries its item's label (the title of a window row), and
+    a prompt with no tab entry still reads: whether it gets a picker is
+    decided later, by its tab and capture rows (P52). Labels stay in the
+    script: it returns booleans and counts."""
+    zen.visit("http://docs.test/label")
+    zen.request_share()
+    got = run(
+        zen,
+        """
+        const r = P.readPrompt(win);
+        if (!r.ok) return { reason: r.reason };
+        const labelled = r.info.entries.every(
+          e => typeof e.label == "string" && e.label === (e.item.getAttribute("label") ?? ""));
+        const docs = r.info.entries.some(e => e.label == "docs.test label");
+        for (const e of r.info.entries) {
+          if (e.mediaSource == "browser") e.item.remove();
+        }
+        const bare = P.readPrompt(win);
+        return {
+          labelled,
+          docs,
+          bare: bare.ok ? "ok" : bare.reason,
+          tabs: bare.ok ? bare.info.entries.filter(e => e.mediaSource == "browser").length : -1,
+        };
+        """,
+    )
+    assert got == {"labelled": True, "docs": True, "bare": "ok", "tabs": 0}, got
+
+
+def test_port_selects_a_window_only_from_a_listed_capture_row(
+    launch_zen, site, addon_xpi
+):
+    """A "window" target must be a window entry whose row the picker
+    listed (`info.captures`), so a hidden Zen window is never selected; a
+    screen of the same id is not that window. The window is made from a tab
+    item (P29). Previews are off, so selecting it starts no capture."""
+    zen = launch_zen({"media.getdisplaymedia.previews.enabled": False})
+    zen.wait_addon_active(zen.install_addon(str(addon_xpi)))
+    zen.visit("http://docs.test/one")
+    zen.visit("http://wiki.test/two")
+    zen.request_share()
+    before = zen.stock_selected()
+    got = run(
+        zen,
+        """
+        const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+        const popup = win.document.getElementById("webRTC-selectWindow-menupopup");
+        const tabs = Array.from(popup.children).filter(i => i.mediaSource == "browser");
+        const item = tabs[tabs.length - 1];
+        item.mediaSource = "window";
+        const id = String(item.deviceId);
+        const r = P.readPrompt(win);
+        if (!r.ok) return { reason: r.reason };
+        const list = win.document.getElementById("webRTC-selectWindow-menulist");
+        const port = captures => P.makePort(win, { ...r.info, captures },
+                                            { Services, ChromeUtils, webrtcUI });
+        const row = { key: "window:" + id, deviceId: id, kind: "window" };
+        const hidden = port([]).select(id, "window");
+        const asScreen = port([{ ...row, key: "screen:" + id, kind: "screen" }]).select(id, "screen");
+        const asTab = port([row]).select(id, "tab");
+        const unchanged = list.selectedItem !== item;
+        const listed = port([row]).select(id, "window");
+        return { hidden, asScreen, asTab, unchanged, listed, selected: list.selectedItem === item };
+        """,
+    )
+    assert got == {
+        "hidden": False,
+        "asScreen": False,
+        "asTab": False,
+        "unchanged": True,
+        "listed": True,
+        "selected": True,
+    }, got
+    assert zen.stock_selected() != before
+    assert zen.stock_prompt_open()
+
+
 def test_read_prompt_rejects_a_camera_request(launch_zen, site, addon_xpi):
     zen = launch_zen({"media.navigator.streams.fake": True})
     zen.wait_addon_active(zen.install_addon(str(addon_xpi)))

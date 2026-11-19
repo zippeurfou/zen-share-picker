@@ -6,8 +6,14 @@
 import { armsAt, delayOf, isArmed, mayDispatch } from "../lib/arming.mjs";
 import { TIMING } from "../lib/config.mjs";
 import { headerText } from "../lib/header.mjs";
-import { hints, initialState, reduce, visibleRows } from "../lib/state.mjs";
-import { startLive, startSnapshots } from "./preview.sys.mjs";
+import { hasWindows, hints, initialState, reduce, visibleRows } from "../lib/state.mjs";
+import {
+  dwellTargets,
+  LIVE_DWELL_MS,
+  liveTarget,
+  startLive,
+  startSnapshots,
+} from "./preview.sys.mjs";
 
 const HTML = "http://www.w3.org/1999/xhtml";
 // Zen's wrapper around the browser UI (tests/acceptance/test_platform.py S2).
@@ -15,6 +21,13 @@ const MOUNT = "zen-main-app-wrapper";
 const NO_PREVIEW = "No preview";
 const PREVIEW_W = 800;
 const PREVIEW_H = 500;
+// A window or screen preview with no frame after this long says "No preview".
+const FRAME_WAIT_MS = 1500;
+const FRAME_POLL_MS = 100;
+const VIEWS = {
+  tabs: { label: "Tabs", placeholder: "Search tabs" },
+  windows: { label: "Windows", placeholder: "Search windows" },
+};
 // Keys the picker owns. Every other key reaches the search input.
 const OWNED = new Set([
   "Escape",
@@ -39,6 +52,9 @@ export function openPicker(
     site = null,
     now = () => ChromeUtils.now(),
     delayMs = TIMING.defaultDelayMs,
+    live = startLive,
+    livePreview = true,
+    accel = "meta",
   }
 ) {
   const doc = win.document;
@@ -92,6 +108,26 @@ export function openPicker(
     text: headerText(site),
   });
   const left = el("div", { class: "zsp-left" });
+  const strip = el("div", {
+    id: "zen-share-picker-tabs",
+    role: "tablist",
+    "aria-label": "Share",
+  });
+  const viewButtons = new Map();
+  for (const view of hasWindows(model) ? ["tabs", "windows"] : ["tabs"]) {
+    const b = el("button", {
+      id: "zen-share-picker-tab-" + view,
+      type: "button",
+      role: "tab",
+      "aria-controls": "zen-share-picker-list",
+      tabindex: "-1",
+      text: VIEWS[view].label,
+    });
+    b.addEventListener("mousedown", e => e.preventDefault());
+    b.addEventListener("click", () => dispatch({ type: "switch", view }));
+    viewButtons.set(view, b);
+    strip.append(b);
+  }
   const search = el("input", {
     id: "zen-share-picker-search",
     type: "search",
@@ -105,7 +141,7 @@ export function openPicker(
     "aria-label": "Tabs",
   });
   const hintBox = el("div", { class: "zsp-hints" });
-  left.append(search, list, hintBox);
+  left.append(strip, search, list, hintBox);
 
   const preview = el("div", { id: "zen-share-picker-preview" });
   const canvas = el("canvas", { class: "zsp-canvas" });
@@ -156,9 +192,72 @@ export function openPicker(
         delete canvas.dataset.deviceId;
       },
     });
-  } else if (previewMode === "live") {
+  }
+  // The one live preview: of the highlighted window or screen, and of the
+  // highlighted tab when previewMode is "live". With livePreview false it
+  // never gets a target. P71: a target reaches it only once the highlight
+  // has rested on its row; a null target reaches it at once.
+  const cap = live(win, preview, { enabled: livePreview });
+  const dwell = dwellTargets(win, t => cap.setTarget(t), LIVE_DWELL_MS);
+  if (previewMode === "live") {
     canvas.hidden = true;
-    loop = startLive(win, preview);
+    loop = cap;
+  }
+  let capTarget = null;
+  let frameTimer = null;
+  let frameSince = 0;
+  let sawLive = false;
+
+  function sameTarget(a, b) {
+    if (a === null || b === null) {
+      return a === b;
+    }
+    return a.deviceId === b.deviceId && a.mediaSource === b.mediaSource;
+  }
+
+  function stopFrameWatch() {
+    if (frameTimer !== null) {
+      win.clearTimeout(frameTimer);
+      frameTimer = null;
+    }
+  }
+
+  // "No preview" until the live preview has a frame: blank for a short wait,
+  // then "No preview", and at once after a failed start. There is no retry.
+  function watchFrames() {
+    frameTimer = null;
+    if (previewStopped || capTarget === null) {
+      return;
+    }
+    let isLive = false;
+    let framed = false;
+    try {
+      isLive = !!cap.isLive?.();
+      framed = isLive && !!cap.hasFrame?.();
+    } catch {
+      isLive = false;
+    }
+    sawLive ||= isLive;
+    const failed = sawLive && !isLive;
+    const waited = now() - frameSince >= FRAME_WAIT_MS;
+    none.hidden = framed || (!failed && !waited);
+    if (!failed) {
+      frameTimer = win.setTimeout(watchFrames, FRAME_POLL_MS);
+    }
+  }
+
+  function setCapTarget(target) {
+    if (!livePreview || sameTarget(target, capTarget)) {
+      return;
+    }
+    capTarget = target;
+    stopFrameWatch();
+    sawLive = false;
+    dwell.set(target);
+    if (target !== null) {
+      frameSince = now();
+      watchFrames();
+    }
   }
 
   function stopPreview() {
@@ -167,17 +266,28 @@ export function openPicker(
     }
     previewStopped = true;
     shown = null;
+    capTarget = null;
+    stopFrameWatch();
+    dwell.cancel();
     try {
       loop?.stop();
     } finally {
-      delete canvas.dataset.deviceId;
-      showNone();
+      try {
+        cap.stop();
+      } finally {
+        delete canvas.dataset.deviceId;
+        showNone();
+      }
     }
   }
 
-  // The highlighted tab row, only if it is visible.
+  // The highlighted tab row, only in the Tabs view and if it is visible.
   function highlighted(rows) {
-    if (state.highlight === null || state.highlight === model.os.key) {
+    if (
+      state.view !== "tabs" ||
+      state.highlight === null ||
+      state.highlight === model.os.key
+    ) {
       return null;
     }
     return rows.find(r => r.key === state.highlight) ?? null;
@@ -188,11 +298,26 @@ export function openPicker(
       return;
     }
     const row = highlighted(rows);
-    if (previewMode === "live") {
-      none.hidden = row !== null;
-      loop.setTarget(row ? row.deviceId : null);
+    // The live preview follows the window highlight in the Windows view
+    // (through liveTarget), and the tab highlight only in the "live" mode.
+    // The tab snapshots stop in the Windows view.
+    if (state.view === "windows" || previewMode === "live") {
+      if (previewMode === "snapshot" && shown !== null) {
+        shown = null;
+        loop.setTarget(null);
+      }
+      let target = liveTarget(model, state);
+      if (state.view !== "windows") {
+        target = row ? { deviceId: row.deviceId, mediaSource: "browser" } : null;
+      }
+      canvas.hidden = true;
+      setCapTarget(target);
+      if (target === null || !livePreview) {
+        none.hidden = false;
+      }
       return;
     }
+    setCapTarget(null);
     if (previewMode !== "snapshot") {
       showNone();
       return;
@@ -229,10 +354,13 @@ export function openPicker(
       "data-group": row.key === model.os.key ? "os" : row.group,
     });
     node.dataset.key = row.key;
-    const selected = row.key === state.highlight;
+    const selected = row.key === current();
     node.setAttribute("aria-selected", selected ? "true" : "false");
     if (row.key === model.os.key) {
       node.append(el("span", { class: "zsp-title", text: row.label }));
+    } else if (row.group === "capture") {
+      node.dataset.kind = row.kind;
+      node.append(el("span", { class: "zsp-title", text: row.title }));
     } else {
       const icon = el("img", { class: "zsp-icon", alt: "" });
       if (row.icon) {
@@ -255,7 +383,22 @@ export function openPicker(
     return node;
   }
 
+  // The highlighted key of the current view.
+  function current() {
+    return state.view === "windows" ? state.windowHighlight : state.highlight;
+  }
+
+  function renderView() {
+    root.dataset.view = state.view;
+    for (const [view, b] of viewButtons) {
+      b.setAttribute("aria-selected", view === state.view ? "true" : "false");
+    }
+    search.placeholder = VIEWS[state.view].placeholder;
+    list.setAttribute("aria-label", VIEWS[state.view].label);
+  }
+
   function render() {
+    renderView();
     const rows = visibleRows(model, state);
     const nodes = [];
     let lastGroup = null;
@@ -273,7 +416,7 @@ export function openPicker(
       }
       lastGroup = row.group === "other" ? g : null;
       const node = rowNode(row, i);
-      if (row.key === state.highlight) {
+      if (row.key === current()) {
         selectedNode = node;
       }
       nodes.push(node);
@@ -309,7 +452,11 @@ export function openPicker(
     }
     const out = reduce(model, state, action);
     const revealed = !state.revealed && out.state.revealed;
+    const switched = out.state.view !== state.view;
     state = out.state;
+    if (switched) {
+      search.value = "";
+    }
     const effect = out.effect;
     if (effect && effect.type === "cancel") {
       close();
@@ -377,6 +524,44 @@ export function openPicker(
     gated({ type: "key", key: e.key }, e);
   }
 
+  // Accel+1 and Accel+2 switch to Tabs and Windows wherever focus is in the
+  // window, and are swallowed even when there is no Windows tab. Any other
+  // modifier held, or another key, passes through. Escape and the hidden
+  // panel's access-key chords are left to its own guard, which listens on
+  // the window too: stopPropagation does not stop it.
+  function accelView(e) {
+    const held = accel === "ctrl" ? e.ctrlKey : e.metaKey;
+    const other = accel === "ctrl" ? e.metaKey : e.ctrlKey;
+    if (!held || other || e.altKey || e.shiftKey) {
+      return null;
+    }
+    if (e.key === "1" || (e.key !== "2" && e.code === "Digit1")) {
+      return "tabs";
+    }
+    if (e.key === "2" || e.code === "Digit2") {
+      return "windows";
+    }
+    return null;
+  }
+
+  function onAccel(e) {
+    if (e.isComposing) {
+      return;
+    }
+    const view = accelView(e);
+    if (!view) {
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const from = state.view;
+    dispatch({ type: "switch", view });
+    // After a switch the keys go to the picker, wherever focus was.
+    if (open && state.view !== from && doc.activeElement !== search) {
+      search.focus();
+    }
+  }
+
   // P44: an Escape that the hidden panel's guard took for this window,
   // wherever focus was. The same rules as an Escape in the picker.
   function escape(e) {
@@ -396,6 +581,7 @@ export function openPicker(
       armTimer = null;
     }
     win.removeEventListener("activate", onActivate, true);
+    win.removeEventListener("keydown", onAccel, true);
     stopPreview();
     root.remove();
     if (before && before.isConnected && doc.activeElement !== before) {
@@ -416,6 +602,7 @@ export function openPicker(
 
   // As PopupNotifications does: the delay restarts on activate.
   win.addEventListener("activate", onActivate, true);
+  win.addEventListener("keydown", onAccel, true);
 
   // A throw here must not leave a picker without a session: one would stay
   // in the DOM and refuse every later picker in this window.

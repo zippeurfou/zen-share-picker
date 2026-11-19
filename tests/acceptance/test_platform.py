@@ -7,10 +7,12 @@ counts, timings). Run with `-rP` to read them.
 """
 
 import json
+import os
+import sys
 import time
 
 import pytest
-from zen import SECONDARY_LABEL, key_input
+from zen import LIST_WINDOWS_PREFS, SECONDARY_LABEL, ZenScriptError, key_input
 
 # Zen's own wrapper around the browser UI, where the picker mounts.
 MOUNT = "zen-main-app-wrapper"
@@ -613,3 +615,182 @@ def test_abandon_denies_without_a_permission(launch_zen, site, camera):
     )
     assert block != 0
     assert zen.screen_permission() == block
+
+
+LOCKED = "the window could not become active (screen locked?)"
+
+# Makes the window active, as request_share() does, and waits out Zen's
+# first-run animation. False when either never happens, as on a locked screen.
+ACTIVATE = """
+try {
+  win.focus();
+  await waitFor(() => Services.focus.activeWindow == win, "the window to become active", 10000);
+  await waitFor(() => !win.document.getElementById("zen-update-animation-border"),
+                "Zen's update animation to end", 5000);
+} catch (e) {
+  return false;
+}
+return true;
+"""
+
+# Zen's own windows against the prompt's window entries. Window titles stay
+# in this script: it returns counts and ids only.
+ZEN_WINDOWS_IN_PROMPT = """
+const zenIds = [];
+const titles = new Set();
+let nativeTitles = 0;
+for (const w of Services.wm.getEnumerator(null)) {
+  zenIds.push(String(w.windowUtils.webrtcRawDeviceId));
+  if (w.document.title) titles.add(w.document.title);
+  const native = w.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow).title;
+  if (native) {
+    titles.add(native);
+    nativeTitles++;
+  }
+}
+const popup = win.document.getElementById("webRTC-selectWindow-menupopup");
+const entries = Array.from(popup.children)
+  .filter(i => i.localName == "menuitem" && i.mediaSource == "window");
+const entryIds = new Set(entries.map(i => String(i.deviceId)));
+const zenTitled = entries.filter(i => titles.has(i.getAttribute("label")));
+const escaped = zenTitled.filter(i => !zenIds.includes(String(i.deviceId)));
+// P70: whether Zen marks its own windows' entries scary, as data only.
+const zenScary = entries.filter(i => zenIds.includes(String(i.deviceId)) && i.scary === true);
+return {
+  zenIds,
+  titles: titles.size,
+  nativeTitles,
+  windowEntries: entries.length,
+  zenTitled: zenTitled.length,
+  escaped: escaped.length,
+  matched: zenIds.filter(id => entryIds.has(id)).length,
+  zenScary: zenScary.length,
+};
+"""
+
+
+def test_zen_windows_match_window_entries(launch_zen, site):
+    """S8. With Apple's picker off, every window entry titled like one of
+    Zen's own windows carries that window's `webrtcRawDeviceId`, so Zen's
+    windows can be told apart by id. A Zen window missing from the list
+    (off screen, minimized) is not a failure. It also records how many of
+    Zen's own window entries are marked scary (P70), a count only."""
+    if os.environ.get("HEADLESS") == "1":
+        pytest.skip("Zen's own windows exist only headful")
+    if sys.platform != "darwin":
+        pytest.skip("only macOS lists windows here")
+    zen = launch_zen(LIST_WINDOWS_PREFS)
+    first = zen.window
+    zen.open_window()
+    zen.visit("http://docs.test/s8-second")
+    zen.open_window(private=True)
+    zen.visit("http://wiki.test/s8-private")
+    zen.use_window(first)
+    zen.settle()
+    if not zen.chrome(ACTIVATE):
+        pytest.skip(LOCKED)
+    try:
+        zen.request_share()
+    except ZenScriptError as e:
+        if "become active" in str(e) or "screen locked" in str(e):
+            pytest.skip(LOCKED)
+        raise
+    seen = zen.chrome(ZEN_WINDOWS_IN_PROMPT)
+    counts = zen.stock_counts()
+    window_ids = zen.stock_ids("window")
+    zen_ids = zen.zen_window_ids()
+    spike("S8", {**seen, "counts": counts})
+    assert sorted(zen_ids) == sorted(seen["zenIds"]), (zen_ids, seen)
+    assert len(window_ids) == seen["windowEntries"] == counts.get("window", 0)
+    # Every Zen window has a title here: the three test pages.
+    assert seen["titles"] >= 3, seen
+    assert seen["escaped"] == 0, seen
+    assert seen["matched"] >= 1, seen
+    assert counts.get("screen", 0) >= 1, counts
+
+
+# The system principal's MediaManagerVideo grant, the one Zen's prompt adds
+# before its own preview (WebRTCParent.sys.mjs:1050-1058). The permission
+# manager answers ALLOW for the system principal whatever is stored, and
+# stores nothing for it, so `stored` counts what is really there.
+PREVIEW_PERMISSION = """
+const perms = Services.perms;
+const system = Services.scriptSecurityManager.getSystemPrincipal();
+return {
+  stored: perms.all.filter(p => p.type == "MediaManagerVideo").length,
+  read: perms.testExactPermissionFromPrincipal(system, "MediaManagerVideo"),
+  allow: perms.ALLOW_ACTION,
+};
+"""
+
+# Firefox's own preview element, live on a tab, in a div of Zen's wrapper.
+# The video is never copied anywhere. On no frame, the same request made
+# directly says why.
+LIVE_TAB_PREVIEW = """
+const [mount, deviceId] = args;
+const doc = win.document;
+const div = doc.createElementNS("http://www.w3.org/1999/xhtml", "div");
+div.id = "zsp-s9";
+div.style.cssText = "position: fixed; top: 0; left: 0; width: 427px; height: 240px; " +
+  "z-index: 2147483647;";
+const el = doc.createElement("webrtc-preview");
+div.append(el);
+doc.getElementById(mount).append(div);
+try {
+  await el.updateComplete;
+  const t0 = ChromeUtils.now();
+  await el.startPreview({ deviceId, mediaSource: "browser", showPreviewControlButtons: false });
+  let frame = true;
+  try {
+    await waitFor(() => el.videoEl.videoWidth > 0, "a first frame",
+                  Math.max(0, 5000 - (ChromeUtils.now() - t0)));
+  } catch (e) {
+    frame = false;
+  }
+  const ms = Math.round(ChromeUtils.now() - t0);
+  const stream = el.videoEl.srcObject;
+  const tracks = stream ? stream.getTracks() : [];
+  const video = stream ? stream.getVideoTracks() : [];
+  const live = video.filter(t => t.readyState == "live").length;
+  const width = el.videoEl.videoWidth;
+  el.stopPreview();
+  const ended = tracks.filter(t => t.readyState == "ended").length;
+  let error = null;
+  if (!frame) {
+    try {
+      const s = await win.navigator.mediaDevices.getUserMedia(
+        { video: { mediaSource: "browser", deviceId: { exact: deviceId } } });
+      s.getTracks().forEach(t => t.stop());
+      error = "none";
+    } catch (e) {
+      error = e.name;
+    }
+  }
+  return { frame, ms, width, tracks: tracks.length, video: video.length, live, ended,
+           cleared: el.videoEl.srcObject === null, error };
+} finally {
+  div.remove();
+}
+"""
+
+
+def test_chrome_live_preview_of_a_tab(zen, site):
+    """S9. Firefox's `<webrtc-preview>`, added to Zen's own UI, shows a tab
+    live within 5 s with no MediaManagerVideo permission stored, and
+    `stopPreview()` ends its track. The system principal reads as allowed
+    without any grant, so a grant before a preview changes nothing."""
+    zen.visit("http://docs.test/s9-first")
+    zen.visit("http://wiki.test/s9-second")
+    target = zen.browser_id("http://wiki.test/s9-second")
+    before = zen.chrome(PREVIEW_PERMISSION)
+    seen = zen.chrome(LIVE_TAB_PREVIEW, MOUNT, target)
+    after = zen.chrome(PREVIEW_PERMISSION)
+    spike("S9", {**seen, "permission_before": before, "permission_after": after})
+    assert before["stored"] == 0, before
+    assert before["read"] == before["allow"], before
+    assert seen["frame"], seen
+    assert seen["width"] > 0, seen
+    assert seen["video"] == 1 and seen["live"] == 1, seen
+    assert seen["ended"] == seen["tracks"] >= 1, seen
+    assert seen["cleared"], seen
+    assert after == before, after

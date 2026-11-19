@@ -9,16 +9,17 @@ import re
 import time
 
 import pytest
-from zen import CENTER_TOL_PX, KEY_NAMES
+from zen import CENTER_TOL_PX, KEY_NAMES, ZenScriptError
 
 # Imports the modules into the chrome script: O (overlay), T (tabs), R (rows),
-# C (config). args[0] is the map of their URLs.
+# C (config), K (captures). args[0] is the map of their URLs.
 IMPORTS = """
 const urls = args[0];
 const O = ChromeUtils.importESModule(urls.overlay);
 const T = ChromeUtils.importESModule(urls.tabs);
 const R = ChromeUtils.importESModule(urls.rows);
 const C = ChromeUtils.importESModule(urls.config);
+const K = ChromeUtils.importESModule(urls.captures);
 """
 
 # Opens the picker on the window's http tabs. args[1] is an options object:
@@ -27,6 +28,14 @@ const C = ChromeUtils.importESModule(urls.config);
 # default null) and `countCaptures` (wrap
 # PageThumbs to count captures and the most in flight at once; `slowMs`
 # delays each capture).
+# For the Windows tab: `captures` (fake rows, a list of {deviceId, kind,
+# title}, built with captureRows; default none), `os` (default
+# {available: true, macos: true}), `tabs` (false builds no tab rows), `livePreview`, and
+# `spyLive`: a `live` factory that never captures. It keeps in `win.__live`
+# the `enabled` it was given and every target set; the test sets `frames`
+# (the video has a frame) and `fail` (the start failed). Like the real one,
+# it adds an empty `.zsp-live` element at the first target and hides it on
+# a null one. `accel` follows the platform.
 OPEN = """
 const opts = args[1] || {};
 const { PageThumbs } = ChromeUtils.importESModule("resource://gre/modules/PageThumbs.sys.mjs");
@@ -44,8 +53,50 @@ for (const w of Services.wm.getEnumerator("navigator:browser")) {
 }
 const facts = T.tabFacts(entries, win, null, Services);
 if (!facts.ok) throw new Error("tabFacts: " + facts.reason);
-const model = R.buildModel(facts.facts, T.hereOf(win), T.spaceNamesOf(win), { available: true });
+const captures = K.captureRows(
+  (opts.captures ?? []).map(c => ({ deviceId: c.deviceId, mediaSource: c.kind, label: c.title })),
+  null,
+  // captureRows takes only a Set of its own realm (the add-on's modules
+  // share one); this script's Set is another realm's.
+  { ok: true, ids: new (Cu.getGlobalForObject(K.captureRows).Set)() }
+).rows;
+const model = R.buildModel(
+  opts.tabs === false ? [] : facts.facts,
+  T.hereOf(win),
+  T.spaceNamesOf(win),
+  opts.os ?? { available: true, macos: true },
+  captures
+);
 win.__effects = [];
+win.__live = null;
+let live;
+if (opts.spyLive) {
+  live = (w, container, o = {}) => {
+    const rec = { calls: (win.__live?.calls ?? 0) + 1, enabled: o.enabled ?? null,
+                  targets: [], stopped: false, frames: false, fail: false };
+    win.__live = rec;
+    let target = null;
+    let el = null;
+    return {
+      setTarget(t) {
+        target = t ? { deviceId: t.deviceId, mediaSource: t.mediaSource } : null;
+        rec.targets.push(target);
+        if (target && !el) {
+          el = w.document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+          el.className = "zsp-live";
+          container.append(el);
+        }
+        if (el) el.hidden = !target;
+      },
+      stop() {
+        rec.stopped = true;
+        target = null;
+      },
+      isLive: () => !rec.stopped && target !== null && !rec.fail,
+      hasFrame: () => !rec.stopped && target !== null && !rec.fail && rec.frames,
+    };
+  };
+}
 win.__captures = { calls: 0, inFlight: 0, maxInFlight: 0 };
 let thumbs = PageThumbs;
 if (opts.countCaptures) {
@@ -71,7 +122,10 @@ win.__picker = O.openPicker(win, model, {
   cssUrl: urls.css,
   PageThumbs: thumbs,
   site: opts.site ?? null,
+  accel: Services.appinfo.OS == "Darwin" ? "meta" : "ctrl",
   ...(opts.delayMs === undefined ? {} : { delayMs: opts.delayMs }),
+  ...(live ? { live } : {}),
+  ...(opts.livePreview === undefined ? {} : { livePreview: opts.livePreview }),
 });
 const doc = win.document;
 await waitFor(() => doc.getElementById("zen-share-picker"), "the picker");
@@ -94,7 +148,16 @@ return {
     title: r.querySelector(".zsp-title")?.textContent ?? null,
     host: r.querySelector(".zsp-host")?.textContent ?? null,
     careful: r.querySelector(".zsp-careful")?.textContent ?? null,
+    kind: r.dataset.kind ?? null,
   })),
+  view: root.dataset.view ?? null,
+  tabs: Array.from(root.querySelectorAll("#zen-share-picker-tabs [role=tab]"))
+    .map(t => t.textContent),
+  tabSelected: root.querySelector('#zen-share-picker-tabs [aria-selected="true"]')
+    ?.textContent ?? null,
+  placeholder: root.querySelector("#zen-share-picker-search")?.placeholder ?? null,
+  query: root.querySelector("#zen-share-picker-search")?.value ?? null,
+  live: win.__live,
   headers: Array.from(root.querySelectorAll(".zsp-space-header")).map(h => h.textContent),
   selected: sel ? sel.querySelector(".zsp-title")?.textContent ?? null : null,
   selectedGroup: sel ? sel.dataset.group : null,
@@ -103,6 +166,10 @@ return {
   canvasId: canvas?.dataset.deviceId ?? null,
   canvases: root.querySelectorAll("#zen-share-picker-preview canvas").length,
   noPreview: !!none && !none.hidden && none.textContent == "No preview",
+  liveShown: (() => {
+    const el = root.querySelector("#zen-share-picker-preview .zsp-live");
+    return !!el && !el.hidden && win.getComputedStyle(el).visibility == "visible";
+  })(),
   focused: doc.activeElement?.id ?? null,
   effects: win.__effects,
 };
@@ -115,6 +182,7 @@ def urls_of(zen):
         "tabs": zen.glue("glue/tabs.sys.mjs"),
         "rows": zen.glue("lib/rows.mjs"),
         "config": zen.glue("lib/config.mjs"),
+        "captures": zen.glue("lib/captures.mjs"),
         "css": zen.glue("glue/picker.css"),
     }
 
@@ -296,18 +364,14 @@ def test_keyboard_moves_filters_and_reveals(zen, site, addon):
     open_picker(zen)
     s = state(zen)
     first = s["selected"]
-    assert [r["group"] for r in s["rows"]] == ["here", "here", "os"], s
+    assert [r["group"] for r in s["rows"]] == ["here", "here"], s
     assert first == s["rows"][0]["title"], s
     zen.press("ArrowDown")
     s = state(zen)
     assert s["selected"] == s["rows"][1]["title"] != first, s
     zen.type_text("wiki")
-    s = wait_state(zen, lambda s: len(s["rows"]) == 2, "the filter")
-    assert [(r["host"], r["group"]) for r in s["rows"]] == [
-        ("wiki.test", "here"),
-        (None, "os"),
-    ], s
-    assert s["rows"][1]["title"] == "Apps, windows or a screen...", s
+    s = wait_state(zen, lambda s: len(s["rows"]) == 1, "the filter")
+    assert [(r["host"], r["group"]) for r in s["rows"]] == [("wiki.test", "here")], s
     for _ in "wiki":
         zen.press("Backspace")
     zen.press("Tab")
@@ -318,7 +382,7 @@ def test_keyboard_moves_filters_and_reveals(zen, site, addon):
     assert sorted(r["host"] for r in other) == ["mail.test", "shop.test"], s
     assert all(r["careful"] == "careful" for r in other), s
     assert all(r["careful"] is None for r in s["rows"] if r["group"] != "other"), s
-    assert s["rows"][-1]["group"] == "os", s
+    assert "os" not in [r["group"] for r in s["rows"]], s
     assert "reveal" not in s["hints"], s
 
 
@@ -388,7 +452,7 @@ def test_enter_twice_for_revealed_row(zen, site, addon):
     assert "Perso" in s["hints"]["confirm"], s
     zen.press("Enter")
     s = state(zen)
-    assert s["effects"] == [{"type": "share", "deviceId": target}], s
+    assert s["effects"] == [{"type": "share", "kind": "tab", "deviceId": target}], s
 
 
 SHARE_DISABLED = (
@@ -587,8 +651,8 @@ def test_long_list_keeps_highlight_in_view(zen, site, addon):
         };
         """
     )
-    assert got["rows"] == 61, got
-    assert got["index"] == 58, got
+    assert got["rows"] == 60, got
+    assert got["index"] == 57, got
     assert got["scrolls"] and got["scrollTop"] > 0, got
     assert got["inside"], got
     zen.press("Home")
@@ -632,14 +696,11 @@ def test_preview_follows_highlight(zen, site, addon):
     zen.press("ArrowDown")
     follows()
     zen.press("Tab")
-    zen.press("End", "ArrowUp")
+    zen.press("End")
     assert state(zen)["selectedGroup"] == "other"
     follows()
-    zen.press("End")
-    s = wait_state(
-        zen, lambda s: s["noPreview"] and s["canvasId"] is None, "No preview", timeout=2
-    )
-    assert s["selectedGroup"] == "os", s
+    zen.press("ArrowUp")
+    s = follows()
     assert s["canvases"] == 1, s
 
 
@@ -704,7 +765,8 @@ def test_a_throw_after_mount_leaves_no_picker(zen, site, addon):
         const row = { key: "k", deviceId: "1", title: "t", host: "h", group: "here",
                       requesting: false, spaceLabel: "Work",
                       get icon() { throw new Error("render-boom"); } };
-        const model = { here: [row], others: [], os: { key: "os", label: "OS", available: true } };
+        const model = { here: [row], others: [], os: { key: "os", label: "OS", available: true },
+                        captures: [] };
         let error = null;
         try {
           O.openPicker(win, model, {
@@ -750,3 +812,440 @@ def test_buttons_keep_focus_in_search(zen, site, addon):
             zen.client.actions.release()
     s = state(zen)
     assert s is not None and s["effects"] == [], s
+
+
+# The Windows tab, on fake capture rows and a spy `live` that never captures.
+CAPTURES = [
+    {"deviceId": "zsp-screen-a", "kind": "screen", "title": "Screen A"},
+    {"deviceId": "zsp-window-b", "kind": "window", "title": "Window B"},
+    {"deviceId": "zsp-window-c", "kind": "window", "title": "Window C"},
+]
+SCREEN_A = {"deviceId": "zsp-screen-a", "mediaSource": "screen"}
+WINDOW_B = {"deviceId": "zsp-window-b", "mediaSource": "window"}
+
+SELECTED_TAB = "return String(win.gBrowser.selectedBrowser.browserId);"
+
+
+def open_windows_picker(zen, **opts):
+    opts.setdefault("captures", CAPTURES)
+    opts.setdefault("spyLive", True)
+    open_picker(zen, **opts)
+
+
+def live_targets(s):
+    return [t for t in (s["live"] or {}).get("targets", []) if t is not None]
+
+
+def to_windows(zen):
+    zen.chord("2")
+    return wait_state(zen, lambda s: s["view"] == "windows", "the Windows view")
+
+
+def test_tab_strip_shows_both_tabs_and_starts_on_tabs(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    s = state(zen)
+    assert s["tabs"] == ["Tabs", "Windows"], s
+    assert s["view"] == "tabs" and s["tabSelected"] == "Tabs", s
+    assert s["placeholder"] == "Search tabs", s
+    assert "asleep" in s["hints"], s
+    got = zen.chrome(
+        """
+        const strip = win.document.getElementById("zen-share-picker-tabs");
+        return {
+          role: strip.getAttribute("role"),
+          ids: Array.from(strip.children).map(b => [b.id, b.getAttribute("role")]),
+        };
+        """
+    )
+    assert got == {
+        "role": "tablist",
+        "ids": [
+            ["zen-share-picker-tab-tabs", "tab"],
+            ["zen-share-picker-tab-windows", "tab"],
+        ],
+    }, got
+    s = to_windows(zen)
+    assert s["tabSelected"] == "Windows" and s["placeholder"] == "Search windows", s
+    assert [(r["title"], r["group"], r["kind"]) for r in s["rows"]] == [
+        ("Screen A", "capture", "screen"),
+        ("Window B", "capture", "window"),
+        ("Window C", "capture", "window"),
+        ("Open the macOS picker (apps, windows or a screen)", "os", None),
+    ], s
+    assert all(r["host"] is None for r in s["rows"]), s
+    assert "asleep" not in s["hints"], s
+    s = wait_state(zen, lambda s: s["canvasId"] is None, "no tab snapshot")
+    assert s["noPreview"], s
+
+
+def test_accel_switches_and_is_swallowed(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    before = zen.chrome(SELECTED_TAB)
+    s = to_windows(zen)
+    assert zen.chrome(SELECTED_TAB) == before
+    assert zen.chrome("return win.__picker.isOpen();")
+    assert s["effects"] == [], s
+    zen.chord("1")
+    s = wait_state(zen, lambda s: s["view"] == "tabs", "the Tabs view")
+    assert zen.chrome(SELECTED_TAB) == before
+    assert zen.chrome("return win.__picker.isOpen();")
+    assert s["focused"] == "zen-share-picker-search", s
+    assert s["effects"] == [], s
+
+
+# A point on the page outside the picker, as [x, y].
+PAGE_POINT = """
+const b = win.gBrowser.selectedBrowser.getBoundingClientRect();
+const p = win.document.getElementById("zen-share-picker").getBoundingClientRect();
+const spots = [
+  [b.left + b.width / 2, (Math.max(b.top, p.bottom) + b.bottom) / 2, b.bottom - p.bottom],
+  [b.left + b.width / 2, (b.top + Math.min(b.bottom, p.top)) / 2, p.top - b.top],
+  [(b.left + Math.min(b.right, p.left)) / 2, b.top + b.height / 2, p.left - b.left],
+  [(Math.max(b.left, p.right) + b.right) / 2, b.top + b.height / 2, b.right - p.right],
+];
+const best = spots.sort((x, y) => y[2] - x[2])[0];
+return best[2] >= 10 ? [Math.round(best[0]), Math.round(best[1])] : null;
+"""
+
+
+def test_accel_switches_with_focus_on_the_page(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    point = zen.chrome(PAGE_POINT)
+    assert point is not None, "no page area outside the picker"
+    zen._click(*point)
+    zen.chrome(
+        """
+        await waitFor(() => win.document.activeElement == win.gBrowser.selectedBrowser,
+                      "focus on the page");
+        """
+    )
+    before = zen.chrome(SELECTED_TAB)
+    s = to_windows(zen)
+    assert zen.chrome(SELECTED_TAB) == before
+    assert zen.chrome("return win.__picker.isOpen();")
+    assert s["effects"] == [], s
+
+
+def test_accel_from_the_page_moves_focus_to_the_picker(zen, site, addon):
+    """After an Accel switch from the page, the arrows reach the picker."""
+    two_spaces(zen)
+    open_windows_picker(zen)
+    point = zen.chrome(PAGE_POINT)
+    assert point is not None, "no page area outside the picker"
+    zen._click(*point)
+    zen.chrome(
+        """
+        await waitFor(() => win.document.activeElement == win.gBrowser.selectedBrowser,
+                      "focus on the page");
+        """
+    )
+    to_windows(zen)
+    s = wait_state(
+        zen, lambda s: s["focused"] == "zen-share-picker-search", "focus in the picker"
+    )
+    zen.press("ArrowDown")
+    s = wait_state(zen, lambda s: s["selected"] == "Screen A", "Screen A highlighted")
+    # The live target follows after the dwell (P71).
+    s = wait_state(zen, lambda s: live_targets(s), "a live target")
+    assert s["live"]["targets"][-1] == SCREEN_A, s
+
+
+def test_accel_two_without_a_windows_tab_does_nothing(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen, captures=[], os={"available": False})
+    s = state(zen)
+    assert s["tabs"] == ["Tabs"], s
+    before = zen.chrome(SELECTED_TAB)
+    zen.chord("2")
+    time.sleep(0.5)
+    s = state(zen)
+    assert s["view"] == "tabs", s
+    assert zen.chrome(SELECTED_TAB) == before
+    assert zen.chrome("return win.__picker.isOpen();")
+    assert s["effects"] == [], s
+
+
+def test_windows_tab_opens_with_nothing_highlighted_and_no_capture(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    s = to_windows(zen)
+    time.sleep(0.3)
+    s = state(zen)
+    assert s["selected"] is None, s
+    assert s["live"]["calls"] == 1, s
+    assert live_targets(s) == [], s
+
+
+def test_arrow_starts_one_live_preview_and_moves_it(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    s = wait_state(zen, lambda s: live_targets(s), "a live target")
+    assert s["selected"] == "Screen A", s
+    assert s["live"]["targets"][-1] == SCREEN_A, s
+    assert s["hints"] == {
+        "screen": "Careful: everything on this screen will be visible."
+    }, s
+    zen.press("ArrowDown")
+    s = wait_state(zen, lambda s: s["live"]["targets"][-1] == WINDOW_B, "Window B")
+    assert s["selected"] == "Window B", s
+    assert s["hints"] == {}, s
+    assert s["live"]["calls"] == 1, s
+    assert live_targets(s) == [SCREEN_A, WINDOW_B], s
+
+
+# Clicks the given rows one after the other in one task, well inside the
+# dwell, then waits for it to pass; then clicks the OS row. Returns the
+# spy's targets at each step.
+QUICK_PASS = """
+const root = win.document.getElementById("zen-share-picker");
+const row = key => root.querySelector(`.zsp-row[data-key="${key}"]`);
+for (const key of args[0]) row(key).click();
+const during = win.__live.targets.slice();
+await new Promise(r => win.setTimeout(r, 400));
+const rested = win.__live.targets.slice();
+row("os").click();
+const stopped = win.__live.targets.slice();
+return { during, rested, stopped };
+"""
+
+
+def test_a_quick_pass_starts_no_live_preview(zen, site, addon):
+    """P71: a live capture starts only once the highlight rests on a row
+    for the dwell; rows passed over start none, and a null target stops the
+    capture at once."""
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    keys = ["screen:zsp-screen-a", "window:zsp-window-b", "window:zsp-window-c"]
+    got = zen.chrome(QUICK_PASS, keys)
+    assert [t for t in got["during"] if t is not None] == [], got
+    window_c = {"deviceId": "zsp-window-c", "mediaSource": "window"}
+    assert [t for t in got["rested"] if t is not None] == [window_c], got
+    assert got["stopped"][-1] is None, got
+
+
+def test_switch_and_close_stop_the_live_preview(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    wait_state(zen, lambda s: live_targets(s), "a live target")
+    zen.chord("1")
+    s = wait_state(zen, lambda s: s["view"] == "tabs", "the Tabs view")
+    assert s["live"]["targets"][-1] is None, s
+    to_windows(zen)
+    s = state(zen)
+    assert s["selected"] is None and s["live"]["targets"][-1] is None, s
+    zen.press("ArrowDown")
+    wait_state(zen, lambda s: s["live"]["targets"][-1] == SCREEN_A, "Screen A")
+    zen.chrome("win.__picker.stopPreview();")
+    s = state(zen)
+    assert s["live"]["stopped"], s
+    n = len(s["live"]["targets"])
+    zen.press("ArrowDown")
+    time.sleep(0.3)
+    s = state(zen)
+    assert len(s["live"]["targets"]) == n, s
+    assert s["noPreview"], s
+    zen.chrome("win.__picker.close();")
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    wait_state(zen, lambda s: live_targets(s), "a live target")
+    zen.chrome("win.__picker.close();")
+    assert zen.chrome("return win.__live.stopped;")
+
+
+def test_typing_on_windows_never_starts_a_preview(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.type_text("Window")
+    s = wait_state(zen, lambda s: s["query"] == "Window", "the query")
+    time.sleep(0.3)
+    s = state(zen)
+    assert [r["title"] for r in s["rows"]][:2] == ["Window B", "Window C"], s
+    assert s["selected"] is None, s
+    assert live_targets(s) == [], s
+
+
+def test_previews_off_never_set_a_target(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen, livePreview=False)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    s = wait_state(zen, lambda s: s["selected"] == "Screen A", "Screen A")
+    time.sleep(0.3)
+    s = state(zen)
+    assert s["live"]["enabled"] is False, s
+    assert s["live"]["targets"] == [], s
+    assert s["noPreview"], s
+
+
+def test_window_preview_says_no_preview_without_a_frame(zen, site, addon):
+    """The live preview shows "No preview" until a real frame arrives,
+    and at once after a failed start, which is never retried."""
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    s = wait_state(zen, lambda s: live_targets(s), "a live target")
+    assert s["liveShown"], s
+    s = wait_state(
+        zen, lambda s: s["noPreview"], "No preview without a frame", timeout=4
+    )
+    # No empty video box next to "No preview".
+    assert not s["liveShown"], s
+    zen.chrome("win.__live.frames = true;")
+    s = wait_state(zen, lambda s: not s["noPreview"], "the frame")
+    assert s["liveShown"], s
+    zen.chrome("win.__live.fail = true;")
+    s = wait_state(
+        zen, lambda s: s["noPreview"], "No preview after a failure", timeout=1
+    )
+    assert not s["liveShown"], s
+    n = len(s["live"]["targets"])
+    time.sleep(0.5)
+    s = state(zen)
+    assert len(s["live"]["targets"]) == n, s
+
+
+def test_click_on_the_windows_tab_switches(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    for button, view in (
+        ("#zen-share-picker-tab-windows", "windows"),
+        ("#zen-share-picker-tab-tabs", "tabs"),
+    ):
+        x, y = zen.chrome(
+            """
+            const r = win.document.querySelector(args[0]).getBoundingClientRect();
+            return [r.left + r.width / 2, r.top + r.height / 2];
+            """,
+            button,
+        )
+        zen._click(int(x), int(y))
+        s = wait_state(zen, lambda s, v=view: s["view"] == v, view)
+        assert s["focused"] == "zen-share-picker-search", s
+        assert s["effects"] == [], s
+
+
+def test_click_on_the_os_row_shows_selected_in_windows(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    wait_state(zen, lambda s: live_targets(s), "a live target")
+    zen.chrome(
+        "win.document.querySelector('#zen-share-picker .zsp-row[data-group=\"os\"]').click();"
+    )
+    s = wait_state(zen, lambda s: s["selectedGroup"] == "os", "the OS row selected")
+    assert s["live"]["targets"][-1] is None, s
+    assert s["noPreview"], s
+
+
+def test_enter_on_a_window_row_reports_a_share_with_kind(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen, delayMs=0)
+    to_windows(zen)
+    zen.press("ArrowDown", "ArrowDown")
+    wait_state(zen, lambda s: s["selected"] == "Window B", "Window B")
+    zen.wait_picker_armed()
+    zen.press("Enter")
+    s = state(zen)
+    assert s["effects"][-1] == {
+        "type": "share",
+        "kind": "window",
+        "deviceId": "zsp-window-b",
+    }, s
+
+
+def test_tab_key_does_nothing_on_windows(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.press("ArrowDown")
+    zen.press("Tab")
+    time.sleep(0.3)
+    s = state(zen)
+    assert s["view"] == "windows" and s["selected"] == "Screen A", s
+    assert not s["headers"], s
+    assert all(r["group"] in ("capture", "os") for r in s["rows"]), s
+    assert s["focused"] == "zen-share-picker-search", s
+    assert s["effects"] == [], s
+    zen.chord("1")
+    s = wait_state(zen, lambda s: s["view"] == "tabs", "the Tabs view")
+    assert not s["headers"], s
+    assert "reveal" in s["hints"], s
+
+
+def test_windows_only_picker_opens_on_windows(zen, site, addon):
+    two_spaces(zen)
+    open_windows_picker(zen, tabs=False)
+    s = state(zen)
+    assert s["view"] == "windows", s
+    assert s["selected"] is None, s
+    assert [r["group"] for r in s["rows"]] == ["capture", "capture", "capture", "os"], s
+    assert live_targets(s) == [], s
+    zen.chord("1")
+    s = wait_state(zen, lambda s: s["view"] == "tabs", "the Tabs view")
+    assert "no-tabs" in s["hints"], s
+    assert s["rows"] == [], s
+
+
+def test_failed_window_preview_says_no_preview_at_once(zen, site, addon):
+    """A failed start shows "No preview" well before the frame wait."""
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    got = zen.chrome(
+        """
+        const root = win.document.getElementById("zen-share-picker");
+        const none = root.querySelector(".zsp-no-preview");
+        root.querySelector('.zsp-row[data-kind="window"]').click();
+        const blank = none.hidden;
+        // The target arrives after the dwell (P71), then the frame watch
+        // sees it live.
+        await waitFor(() => win.__live.targets.some(t => t), "the live target");
+        await new Promise(r => win.setTimeout(r, 150));
+        const t0 = ChromeUtils.now();
+        win.__live.fail = true;
+        await waitFor(() => !none.hidden, "No preview");
+        return { blank, ms: ChromeUtils.now() - t0, targets: win.__live.targets.length };
+        """
+    )
+    assert got["blank"] is True, got
+    assert got["ms"] < 1000, got
+    time.sleep(0.5)
+    assert len(state(zen)["live"]["targets"]) == got["targets"]
+
+
+def test_click_row_clicks_only_a_row_it_can_reach(zen, site, addon):
+    """The harness's click_row clicks the row by key, and refuses, before
+    any click, when something else is at the row's centre."""
+    two_spaces(zen)
+    open_windows_picker(zen)
+    to_windows(zen)
+    zen.click_row("window:zsp-window-c")
+    wait_state(zen, lambda s: s["selected"] == "Window C", "Window C")
+    zen.chrome(
+        """
+        const row = win.document.querySelector(
+          '#zen-share-picker .zsp-row[data-key="window:zsp-window-b"]');
+        const r = row.getBoundingClientRect();
+        const cover = win.document.createElementNS("http://www.w3.org/1999/xhtml", "div");
+        cover.id = "zsp-test-cover";
+        cover.style.cssText = `position: fixed; left: ${r.left}px; top: ${r.top}px; ` +
+          `width: ${r.width}px; height: ${r.height}px; z-index: 2147483647;`;
+        win.document.documentElement.append(cover);
+        """
+    )
+    with pytest.raises(ZenScriptError, match="not on that row"):
+        zen.click_row("window:zsp-window-b")
+    s = state(zen)
+    assert s["selected"] == "Window C", s

@@ -39,6 +39,12 @@ BLOCK_LINES = [
 EXPECTED_BLOCK = "\n".join([BEGIN, *BLOCK_LINES, END]) + "\n"
 BLOCK_NAMES = [line.split('"')[1] for line in BLOCK_LINES]
 
+# --list-windows adds this line, last (P54).
+PICKER = "media.getdisplaymedia.screencapturekit.picker.enabled"
+PICKER_LINE = f'user_pref("{PICKER}", false);'
+WINDOWS_BLOCK = "\n".join([BEGIN, *BLOCK_LINES, PICKER_LINE, END]) + "\n"
+ALL_NAMES = [*BLOCK_NAMES, PICKER]
+
 
 def _uv_dir(what: str) -> str:
     out = subprocess.run(["uv", what, "dir"], capture_output=True, text=True)
@@ -1415,22 +1421,239 @@ def test_one_zen_data_directory_is_used_without_asking(tmp_path, monkeypatch):
     assert not native.exists()
 
 
+def _block_names(block: str) -> list[str]:
+    return re.findall(r'^user_pref\("([^"]+)",', block, flags=re.MULTILINE)
+
+
 def test_readme_lists_exactly_the_prefs_the_block_sets(tmp_path):
-    """The README's manual uninstall names every pref of the block, in the
-    block's order, and says how many there are."""
-    if not (REPO / "README.md").exists():
-        pytest.skip("no README.md yet")
-    block = print_block(tmp_path)
-    names = re.findall(r'^user_pref\("([^"]+)",', block, flags=re.MULTILINE)
-    assert names, block
+    """The README's manual uninstall names the 5 prefs uninstall resets, in
+    the order of `--print-block --list-windows`, the first 4 being the
+    default block. Every "<N> prefs" says 4 (the default block) or 5 (with
+    --list-windows, and what uninstall resets)."""
+    default = _block_names(print_block(tmp_path))
+    r = run("--print-block", "--list-windows", "--profile", str(tmp_path))
+    assert r.returncode == 0, r.stderr
+    names = _block_names(r.stdout)
+    assert len(default) == 4 and len(names) == 5, (default, names)
     readme = (REPO / "README.md").read_text()
     m = re.search(
-        r"the block sets these (\d+) prefs.*?\n```\n(.*?)\n```", readme, re.DOTALL
+        r"uninstall resets these (\d+) prefs.*?\n```\n(.*?)\n```", readme, re.DOTALL
     )
-    assert m, "the README has no list of the prefs the block sets"
-    assert m.group(2).split("\n") == names
+    assert m, "the README has no list of the prefs uninstall resets"
+    assert m.group(1) == "5"
+    listed = m.group(2).split("\n")
+    assert listed == names
+    assert listed[:4] == default
     counts = set(re.findall(r"\b(\d+) prefs\b", readme))
-    assert counts == {str(len(names))}, f"README pref counts: {counts}"
+    assert counts == {"4", "5"}, f"README pref counts: {counts}"
+
+
+# -- --list-windows (P54) -------------------------------------------------------------
+
+
+def test_list_windows_block_adds_the_picker_pref_last(tmp_path):
+    r = run("--print-block", "--list-windows", "--profile", str(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == EXPECTED_BLOCK.replace(END, PICKER_LINE + "\n" + END)
+    assert r.stdout == WINDOWS_BLOCK
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
+
+
+def test_install_with_list_windows_writes_five_prefs(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    r = run("--profile", str(profile), "--xpi", str(xpi), "--list-windows")
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == WINDOWS_BLOCK
+    assert PICKER_LINE in r.stdout
+    assert (profile / "extensions" / f"{ADDON_ID}.xpi").exists()
+
+
+def test_rerun_with_the_same_flag_keeps_one_block(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    (profile / "user.js").write_text('user_pref("a", 1);\n')
+    for _ in range(3):
+        r = run("--profile", str(profile), "--xpi", str(xpi), "--list-windows")
+        assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == 'user_pref("a", 1);\n' + WINDOWS_BLOCK
+
+
+def install_with_flag(profile: Path, xpi: Path) -> None:
+    r = run("--profile", str(profile), "--xpi", str(xpi), "--list-windows")
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text().endswith(PICKER_LINE + "\n" + END + "\n")
+
+
+def write_all_prefs_js(profile: Path) -> None:
+    """prefs.js as Zen leaves it after a run with --list-windows: the five
+    prefs among unrelated lines."""
+    lines = PREFS_JS_HEAD
+    for name in ALL_NAMES:
+        value = "false" if name in (PICKER, BLOCK_NAMES[0]) else "true"
+        lines += f'user_pref("{name}", {value});\n'
+    (profile / "prefs.js").write_bytes((lines + PREFS_JS_TAIL).encode("utf-8"))
+
+
+def test_rerun_without_the_flag_turns_apple_picker_back_on(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    r = run("--profile", str(profile), "--xpi", str(xpi), "--list-windows")
+    assert r.returncode == 0, r.stderr
+    write_all_prefs_js(profile)
+    before = (profile / "prefs.js").read_bytes()
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == EXPECTED_BLOCK
+    assert (profile / "prefs.js").read_bytes() == before.replace(
+        (PICKER_LINE + "\n").encode(), b""
+    )
+    assert f"reset {PICKER} in prefs.js" in r.stdout
+    # The other four prefs are the new block's: they stay in prefs.js.
+    for name in BLOCK_NAMES:
+        assert f"reset {name} " not in r.stdout
+
+
+def test_rerun_without_the_flag_dry_run_writes_nothing(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    write_all_prefs_js(profile)
+    before = snapshot(profile)
+    r = run("--profile", str(profile), "--xpi", str(xpi), "--dry-run")
+    assert r.returncode == 0, r.stderr
+    assert snapshot(profile) == before
+    assert f"[dry run] would reset {PICKER} in prefs.js" in r.stdout
+
+
+def test_rerun_without_the_flag_and_without_prefs_js_is_fine(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == EXPECTED_BLOCK
+    assert not (profile / "prefs.js").exists()
+
+
+def test_rerun_without_the_flag_writes_through_a_symlinked_prefs_js(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    real = tmp_path / "dotfiles" / "prefs.js"
+    real.parent.mkdir()
+    (profile / "prefs.js").symlink_to(real)
+    write_all_prefs_js(profile)
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode == 0, r.stderr
+    assert (profile / "prefs.js").is_symlink()
+    assert PICKER not in real.read_text()
+    assert BLOCK_NAMES[0] in real.read_text()
+
+
+def test_rerun_without_the_flag_with_unreadable_prefs_js_changes_nothing(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    (profile / "prefs.js").mkdir()  # a directory where the file belongs
+    before = snapshot(profile)
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode != 0 and "Traceback" not in r.stderr
+    assert "nothing was changed" in r.stderr.lower()
+    assert snapshot(profile) == before
+
+
+def test_rerun_without_the_flag_finishes_after_a_prefs_js_failure(tmp_path, xpi):
+    """A failed prefs.js write must leave a state the same command finishes:
+    the old block, still setting the picker pref, is kept until prefs.js is
+    reset."""
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    ro = tmp_path / "dotfiles"
+    ro.mkdir()
+    (ro / "prefs.js").write_text(PICKER_LINE + '\nuser_pref("keep", 1);\n')
+    (profile / "prefs.js").symlink_to(ro / "prefs.js")
+    readonly_dir(ro)
+    try:
+        r = run("--profile", str(profile), "--xpi", str(xpi))
+        assert r.returncode != 0 and "Traceback" not in r.stderr
+        assert "re-run" in r.stderr.lower()
+        assert (profile / "user.js").read_text() == WINDOWS_BLOCK
+    finally:
+        ro.chmod(0o755)
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == EXPECTED_BLOCK
+    assert (ro / "prefs.js").read_text() == 'user_pref("keep", 1);\n'
+
+
+def test_rerun_without_the_flag_leaves_a_hand_set_picker_pref(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    run("--profile", str(profile), "--xpi", str(xpi))
+    write_all_prefs_js(profile)
+    before = (profile / "prefs.js").read_bytes()
+    r = run("--profile", str(profile), "--xpi", str(xpi))
+    assert r.returncode == 0, r.stderr
+    assert (profile / "prefs.js").read_bytes() == before
+    assert PICKER not in r.stdout
+
+
+def test_uninstall_resets_the_picker_pref_even_when_set_by_hand(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    run("--profile", str(profile), "--xpi", str(xpi))
+    write_all_prefs_js(profile)
+    r = run("--profile", str(profile), "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert (profile / "prefs.js").read_bytes() == (
+        PREFS_JS_HEAD + PREFS_JS_TAIL
+    ).encode("utf-8")
+    for name in ALL_NAMES:
+        assert f"reset {name} in prefs.js" in r.stdout
+
+
+def test_uninstall_accepts_and_ignores_list_windows(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    install_with_flag(profile, xpi)
+    write_all_prefs_js(profile)
+    r = run("--profile", str(profile), "--uninstall", "--list-windows")
+    assert r.returncode == 0, r.stderr
+    assert not (profile / "user.js").exists()
+    assert (profile / "prefs.js").read_bytes() == (
+        PREFS_JS_HEAD + PREFS_JS_TAIL
+    ).encode("utf-8")
+
+
+def test_uninstall_says_another_block_sets_the_picker_pref_again(tmp_path, xpi):
+    profile = make_profile(tmp_path, "p")
+    other = f'// mine\n{PICKER_LINE}\nuser_pref("a", 1);\n'
+    (profile / "user.js").write_text(other)
+    run("--profile", str(profile), "--xpi", str(xpi))
+    write_all_prefs_js(profile)
+    r = run("--profile", str(profile), "--uninstall")
+    assert r.returncode == 0, r.stderr
+    assert (profile / "user.js").read_text() == other
+    last = r.stdout.strip().splitlines()[-1]
+    assert "Zen applies them again at the next start" in last, last
+    assert PICKER in last, last
+    assert BLOCK_NAMES[0] not in last, last
+
+
+NOTE_WINDOWS = (
+    "Apple's screen picker is off in this profile: Zen lists your screens and "
+    "windows itself. macOS may ask you to allow that at the first window "
+    "preview or share, and maybe again later. "
+    "Run this script again without --list-windows to turn Apple's picker back on."
+)
+
+
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_notes_explain_the_alert_only_with_list_windows(tmp_path, xpi):
+    a = make_profile(tmp_path, "a")
+    b = make_profile(tmp_path, "b")
+    with_flag = run("--profile", str(a), "--xpi", str(xpi), "--list-windows")
+    without = run("--profile", str(b), "--xpi", str(xpi))
+    assert with_flag.returncode == 0 and without.returncode == 0
+    assert NOTE_WINDOWS in _flat(with_flag.stdout)
+    assert "Apple" not in without.stdout
+    notes = without.stdout[without.stdout.index("Next steps") :]
+    flagged = with_flag.stdout[with_flag.stdout.index("Next steps") :]
+    assert _flat(flagged).replace("- " + NOTE_WINDOWS + " ", "") == _flat(notes)
 
 
 # -- Windows -----------------------------------------------------------------------

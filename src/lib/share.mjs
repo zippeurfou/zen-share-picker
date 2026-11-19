@@ -8,12 +8,13 @@
 // has passed.
 
 // Outcomes:
-//   "shared"      the prompt went after our click and the tab is being shared
+//   "shared"      the prompt went after our click and the tab, window or
+//                 screen is being shared (checked by kind and id)
 //   "handed-off"  the prompt went after our click on the OS-picker entry
 //   "assist"      the picker closed with the choice selected; the user presses Allow
 //   "aborted"     nothing was clicked; the prompt was gone or the choice failed
 //   "unverified"  the prompt went after our click, but no stream showed the
-//                 tab; or something threw after a click
+//                 choice; or something threw after a click
 //
 // Nothing ever runs a share again: "assist" means the user acts on the stock
 // prompt.
@@ -136,7 +137,7 @@ export async function runShare({
     return "assist";
   }
 
-  // 5. The prompt went after our click: check that the tab is shared.
+  // 5. The prompt went after our click: check that the choice is shared.
   async function verify() {
     if (target.kind === "os") {
       log("share: handed-off");
@@ -144,7 +145,7 @@ export async function runShare({
     }
     const end = clock.now() + timing.verifyMs;
     for (;;) {
-      if (port.sharingShows(target.deviceId)) {
+      if (port.sharingShows(target.deviceId, target.kind)) {
         log("share: shared");
         return "shared";
       }

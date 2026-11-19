@@ -31,8 +31,14 @@ const names = new Map([
   ["work", "Work"],
   ["perso", "Perso"],
 ]);
-const os = { available: true };
+const os = { available: true, macos: true };
 const here = { spaceId: "work", ucid: 1 };
+
+test("captures_pass_through_build_model", () => {
+  const cap = [{ key: "window:1", deviceId: "1", kind: "window", title: "W", host: "", group: "capture" }];
+  assert.deepEqual(buildModel([fact()], here, names, os, cap).captures, cap);
+  assert.deepEqual(buildModel([fact()], here, names, os).captures, []);
+});
 
 test("essential_counts_here_only_in_its_container", () => {
   const e = fact({ essential: true, ucid: 1, spaceId: null });
@@ -114,7 +120,21 @@ test("other_groups_labelled_and_ordered_by_recency", () => {
   assert.deepEqual(m.others[1].rows.map(r => r.key), [p2.syncKey, p1.syncKey]);
   assert.equal(m.others[1].rows[0].spaceLabel, "Perso");
   assert.equal(m.others[1].rows[0].group, "other");
-  assert.equal(m.os.label, "Apps, windows or a screen...");
+});
+
+test("os_label_names_macos_only_on_macos", () => {
+  const mac = buildModel([fact()], here, names, { available: true, macos: true });
+  assert.deepEqual(mac.os, {
+    key: "os",
+    label: "Open the macOS picker (apps, windows or a screen)",
+    available: true,
+  });
+  const other = buildModel([fact()], here, names, { available: false, macos: false });
+  assert.deepEqual(other.os, {
+    key: "os",
+    label: "Open the system picker (apps, windows or a screen)",
+    available: false,
+  });
 });
 
 test("matches_title_or_host_case_insensitively", () => {

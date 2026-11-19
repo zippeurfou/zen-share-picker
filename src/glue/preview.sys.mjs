@@ -1,4 +1,6 @@
-// The picker's preview of the highlighted tab. Both loops capture only the
+import { visibleRows } from "../lib/state.mjs";
+
+// The picker's preview of the highlighted row. Both loops capture only the
 // target they are given, and stop() ends them for good: a stopped loop
 // ignores every later setTarget.
 
@@ -107,51 +109,88 @@ export function startSnapshots(
 }
 
 // A live capture through Firefox's own <webrtc-preview>, as the stock prompt
-// shows its selected entry. At most one capture runs: setTarget stops the
-// previous one first.
-export function startLive(win, container) {
-  const el = win.document.createElement("webrtc-preview");
-  el.classList.add("zsp-live");
-  container.append(el);
+// shows its selected entry. A target is {deviceId, mediaSource}, where
+// mediaSource is "browser", "window" or "screen", or null for none.
+// - The element is created on the first target, never before.
+// - At most one capture runs: a new target stops the old one before it
+//   starts, and a start that resolves after a newer setTarget or stop() is
+//   stopped unless a newer start already replaced it.
+// - setTarget(null) stops the capture and hides the element at once.
+// - stop() is final: it removes the element and later calls do nothing.
+// - With `enabled` false nothing is created or started (previews turned off,
+//   as in Zen's prompt).
+// - It writes no permission.
+// isLive() is true from a start until the next stop. hasFrame() is true only
+// while live and the element's video has a frame (a non-zero width): a start
+// that macOS refuses can stay live with no frame.
+export function startLive(win, container, { enabled = true } = {}) {
+  let el = null;
   let target = null;
   let gen = 0;
-  let stopped = false;
+  let startedGen = 0;
+  let live = false;
+  let stopped = !enabled;
 
   function halt() {
+    live = false;
     try {
-      el.stopPreview?.();
+      el?.stopPreview?.();
     } catch {
       // The element may not be upgraded yet; nothing runs then.
     }
   }
 
+  function same(a, b) {
+    if (a === null || b === null) {
+      return a === b;
+    }
+    return a.deviceId === b.deviceId && a.mediaSource === b.mediaSource;
+  }
+
   return {
-    async setTarget(deviceId) {
-      if (stopped || deviceId === target) {
+    async setTarget(next) {
+      next = next ?? null;
+      if (stopped || same(next, target)) {
         return;
       }
       const mine = ++gen;
-      target = deviceId ?? null;
+      target = next && { deviceId: next.deviceId, mediaSource: next.mediaSource };
       halt();
-      el.hidden = target === null;
       if (target === null) {
+        if (el) {
+          el.hidden = true;
+        }
         return;
       }
+      if (!el) {
+        el = win.document.createElement("webrtc-preview");
+        el.classList.add("zsp-live");
+        container.append(el);
+      }
+      el.hidden = false;
+      const { deviceId, mediaSource } = target;
       try {
         await el.updateComplete;
         if (stopped || mine !== gen) {
           return;
         }
+        startedGen = mine;
+        live = true;
         await el.startPreview({
-          deviceId: target,
-          mediaSource: "browser",
+          deviceId,
+          mediaSource,
           showPreviewControlButtons: false,
         });
-        if (stopped || mine !== gen) {
+        if ((stopped || mine !== gen) && startedGen === mine) {
           halt();
         }
       } catch {
-        halt();
+        if (!stopped && mine === gen) {
+          halt();
+          el.hidden = true;
+        } else if (startedGen === mine) {
+          halt();
+        }
       }
     },
     stop() {
@@ -162,7 +201,83 @@ export function startLive(win, container) {
       gen++;
       target = null;
       halt();
-      el.remove();
+      el?.remove();
+    },
+    isLive() {
+      return live;
+    },
+    hasFrame() {
+      if (!live || !el || el.hidden) {
+        return false;
+      }
+      try {
+        return (el.videoEl?.videoWidth ?? 0) > 0;
+      } catch {
+        return false;
+      }
     },
   };
+}
+
+// P71: how long the highlight rests on a row before its live capture starts.
+export const LIVE_DWELL_MS = 150;
+
+// Feeds targets to apply(target) after a dwell, so a highlight that only
+// passes over rows starts no capture. A new target stops the applied one at
+// once and is applied after `ms`, unless another comes first. A null target
+// stops at once. cancel() drops a pending target. A Firefox capture can't be
+// cancelled once requested, so it is better never to request it.
+export function dwellTargets(win, apply, ms) {
+  let timer = null;
+  let applied = null;
+
+  function cancel() {
+    if (timer !== null) {
+      win.clearTimeout(timer);
+      timer = null;
+    }
+  }
+
+  function put(target) {
+    applied = target;
+    apply(target);
+  }
+
+  return {
+    set(target) {
+      cancel();
+      if (applied !== null) {
+        put(null);
+      }
+      if (target === null) {
+        return;
+      }
+      timer = win.setTimeout(() => {
+        timer = null;
+        put(target);
+      }, ms);
+    },
+    cancel,
+  };
+}
+
+// The live preview's target for the picker's model and state: the highlighted
+// window or screen, only while the Windows view shows and that row is
+// visible, else null. Feeding every state change through
+// setTarget(liveTarget(model, state)) stops a capture at once when the view
+// switches to Tabs, the highlight moves or hides, or a new model drops the
+// row.
+export function liveTarget(model, state) {
+  if (state.view !== "windows" || state.windowHighlight === null) {
+    return null;
+  }
+  const key = state.windowHighlight;
+  if (!visibleRows(model, state).some(r => r.key === key)) {
+    return null;
+  }
+  const row = model.captures.find(r => r.key === key);
+  if (!row || (row.kind !== "window" && row.kind !== "screen")) {
+    return null;
+  }
+  return { deviceId: row.deviceId, mediaSource: row.kind };
 }

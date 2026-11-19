@@ -43,6 +43,32 @@
   gap: 8px;
 }
 
+#zen-share-picker-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+}
+
+#zen-share-picker-tabs [role="tab"] {
+  appearance: none;
+  padding: 6px 12px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: CanvasText;
+  font: inherit;
+}
+
+#zen-share-picker-tabs [role="tab"]:hover {
+  background: color-mix(in srgb, CanvasText 8%, transparent);
+}
+
+#zen-share-picker-tabs [role="tab"][aria-selected="true"] {
+  border-bottom-color: var(--zen-primary-color, AccentColor);
+  font-weight: 600;
+}
+
 #zen-share-picker-search {
   box-sizing: border-box;
   width: 100%;
@@ -127,7 +153,8 @@
   opacity: 0.8;
 }
 
-#zen-share-picker .zsp-hint[data-hint="confirm"] {
+#zen-share-picker .zsp-hint[data-hint="confirm"],
+#zen-share-picker .zsp-hint[data-hint="screen"] {
   font-weight: 600;
   opacity: 1;
 }
@@ -152,6 +179,13 @@
 
 #zen-share-picker .zsp-no-preview {
   opacity: 0.6;
+}
+
+/* While "No preview" shows, the live preview's empty video box stays out of
+   sight. It still runs, so a late first frame is seen. */
+#zen-share-picker .zsp-no-preview:not([hidden]) ~ .zsp-live {
+  position: absolute;
+  visibility: hidden;
 }
 
 #zen-share-picker .zsp-buttons {

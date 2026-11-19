@@ -5,9 +5,10 @@
 # ///
 """Install or remove zen-share-picker in a Zen profile.
 
-    uv run scripts/install.py [--profile PATH] [--zen-dir DIR] [--xpi PATH | --latest] [--dry-run]
+    uv run scripts/install.py [--profile PATH] [--zen-dir DIR] [--xpi PATH | --latest]
+                              [--list-windows] [--dry-run]
     uv run scripts/install.py --uninstall [--profile PATH] [--zen-dir DIR] [--dry-run]
-    uv run scripts/install.py --print-block
+    uv run scripts/install.py --print-block [--list-windows]
 
 Install does three things in the profile and prints each one:
 
@@ -18,6 +19,11 @@ Install does three things in the profile and prints each one:
 2. Copies the XPI to <profile>/extensions/<add-on id>.xpi.
 3. The block also carries two sideload prefs (see SIDELOAD_PREFS), so Zen
    finds that file at the next start and enables it without a prompt.
+
+With --list-windows the block also turns Apple's screen picker off (see
+WINDOWS_PREFS). Each run writes the block for its own flags (P54): a run
+without the flag over a block that had it also deletes that pref's line from
+prefs.js, so Apple's picker comes back.
 
 Quit Zen first: the script refuses to touch a profile whose lock is held.
 Standard library only. macOS and Linux only: the lock check needs POSIX
@@ -85,6 +91,13 @@ SIDELOAD_PREFS = [
 ]
 
 
+# --list-windows only (P54). A startup-only pref: with Apple's picker off, Zen
+# lists screens and windows itself, and the picker shows them in its Windows tab.
+WINDOWS_PREFS = [
+    ("media.getdisplaymedia.screencapturekit.picker.enabled", False),
+]
+
+
 class InstallError(Exception):
     """A problem to report to the user, without a traceback."""
 
@@ -93,9 +106,13 @@ def _line(name: str, value: object) -> str:
     return f"user_pref({json.dumps(name)}, {json.dumps(value)});"
 
 
-def build_block() -> str:
+def _block_prefs(list_windows: bool) -> list[tuple[str, object]]:
+    return ADDON_PREFS + SIDELOAD_PREFS + (WINDOWS_PREFS if list_windows else [])
+
+
+def build_block(list_windows: bool = False) -> str:
     lines = [BEGIN]
-    lines += [_line(n, v) for n, v in ADDON_PREFS + SIDELOAD_PREFS]
+    lines += [_line(n, v) for n, v in _block_prefs(list_windows)]
     lines.append(END)
     return "\n".join(lines) + "\n"
 
@@ -462,9 +479,9 @@ def step(name: str):
 # -- prefs.js (R32) -----------------------------------------------------------------
 
 
-def block_pref_names() -> list[str]:
+def block_pref_names(list_windows: bool = False) -> list[str]:
     """The pref names the block sets, from the same lists build_block uses."""
-    return [n for n, _ in ADDON_PREFS + SIDELOAD_PREFS]
+    return [n for n, _ in _block_prefs(list_windows)]
 
 
 def prefs_set_in(text: str, names: list[str]) -> list[str]:
@@ -598,7 +615,7 @@ Next steps and good to know:
 - What the block enables in this profile: unsigned add-ons, experiment
   add-ons, and any add-on file in this profile's extensions folder starting
   without a prompt. Only install add-on files you trust.
-- If zen-space-scope is installed, its own block in user.js sets some of the
+{windows}- If zen-space-scope is installed, its own block in user.js sets some of the
   same prefs. That block is left alone, by install and by uninstall, and it
   sets its prefs again at every start.
 - To uninstall: quit Zen, then run this script with --uninstall. It removes
@@ -607,6 +624,17 @@ Next steps and good to know:
   value you had before installing is not restored.
 - To uninstall by hand: quit Zen, remove the XPI and the block, then reset
   those prefs in about:config (or delete their lines from prefs.js)."""
+
+NOTE_WINDOWS = """\
+- Apple's screen picker is off in this profile: Zen lists your screens and
+  windows itself. macOS may ask you to allow that at the first window
+  preview or share, and maybe again later.
+  Run this script again without --list-windows to turn Apple's picker back on.
+"""
+
+
+def notes(list_windows: bool) -> str:
+    return NOTES.format(windows=NOTE_WINDOWS if list_windows else "")
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -627,12 +655,18 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     ap.add_argument(
         "--print-block", action="store_true", help="print the user.js block and exit"
     )
+    ap.add_argument(
+        "--list-windows",
+        action="store_true",
+        help="also turn Apple's screen picker off, so Zen lists screens and "
+        "windows itself (not kept: pass it again on every run)",
+    )
     return ap.parse_args(argv)
 
 
 def run(args: argparse.Namespace) -> int:
     if args.print_block:
-        sys.stdout.write(build_block())
+        sys.stdout.write(build_block(args.list_windows))
         return 0
 
     if fcntl is None:
@@ -680,16 +714,22 @@ def _run_in_profile(args, profile, dry, say) -> int:
 
     if args.uninstall:
         return uninstall(profile, user_js, target, original, xpi_dest, dry, say)
-    return install(args, target, original, xpi_dest, dry, say)
+    return install(args, profile, target, original, xpi_dest, dry, say)
+
+
+def _prefs_js(profile: Path) -> tuple[Path, Path]:
+    """prefs.js, and the file to write: its target when it is a symlink."""
+    prefs_js = profile / "prefs.js"
+    if prefs_js.is_symlink():
+        return prefs_js, Path(os.path.realpath(prefs_js))
+    return prefs_js, prefs_js
 
 
 def uninstall(profile, user_js, target, original, xpi_dest, dry, say) -> int:
     # Reads and computation first: a failure here changes nothing.
-    names = block_pref_names()
-    prefs_js = profile / "prefs.js"
-    prefs_target = (
-        Path(os.path.realpath(prefs_js)) if prefs_js.is_symlink() else prefs_js
-    )
+    # Every pref a block of any flags sets, whatever this block held (P54).
+    names = block_pref_names(list_windows=True)
+    prefs_js, prefs_target = _prefs_js(profile)
     prefs_text = _read(prefs_target)
     new_prefs, found = (None, [])
     if prefs_text is not None:
@@ -760,9 +800,25 @@ def uninstall(profile, user_js, target, original, xpi_dest, dry, say) -> int:
     return 0
 
 
-def install(args, target, original, xpi_dest, dry, say) -> int:
+def install(args, profile, target, original, xpi_dest, dry, say) -> int:
     # Everything that can fail runs before the first write.
-    block = build_block()
+    block = build_block(args.list_windows)
+    # Without the flag, over a block that turned Apple's picker off, that
+    # pref's line also leaves prefs.js, or Zen would keep it (P54). Only then
+    # is prefs.js read. A pref set by hand, outside the block, is left alone.
+    old_span = _split_block(original) if original else None
+    old_block = original[old_span[0] : old_span[1]] if old_span else ""
+    dropped = [
+        n
+        for n in prefs_set_in(old_block, block_pref_names(True))
+        if n not in block_pref_names(args.list_windows)
+    ]
+    prefs_js, prefs_target = _prefs_js(profile)
+    new_prefs, found = None, []
+    if dropped:
+        prefs_text = _read(prefs_target)
+        if prefs_text is not None:
+            new_prefs, found = reset_prefs(prefs_text, dropped)
     with tempfile.TemporaryDirectory() as tmp:
         if args.xpi:
             xpi = Path(args.xpi).expanduser()
@@ -781,7 +837,17 @@ def install(args, target, original, xpi_dest, dry, say) -> int:
         if not dry:
             with step("copying the add-on file"):
                 _install_file(xpi, xpi_dest)
-        if original and _split_block(original):
+        # prefs.js before the block: if this write fails, the old block still
+        # names the pref, so running the same command again finishes the job.
+        if found:
+            if prefs_js.is_symlink():
+                print(f"prefs.js is a symlink to {prefs_target}; writing through")
+            for name in found:
+                print(say(f"reset {name} in prefs.js", f"reset {name} in prefs.js"))
+            if not dry:
+                with step("resetting the prefs in prefs.js"):
+                    _write_through(prefs_target, new_prefs)
+        if old_span:
             head = say("update the block in", "updated the block in")
         else:
             head = say("add the block to", "added the block to")
@@ -793,7 +859,7 @@ def install(args, target, original, xpi_dest, dry, say) -> int:
 
     if dry:
         print("Dry run: nothing was written.")
-    print(NOTES)
+    print(notes(args.list_windows))
     return 0
 
 

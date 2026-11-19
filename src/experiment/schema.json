@@ -1,7 +1,7 @@
 [
   {
     "namespace": "sharePicker",
-    "description": "A centered, keyboard-first tab picker for Zen's screen-share prompt.",
+    "description": "A centered, keyboard-first tab, window and screen picker for Zen's screen-share prompt.",
     "types": [
       {
         "id": "Status",
@@ -25,7 +25,7 @@
           "shareMode": { "type": "string" },
           "previewMode": { "type": "string" },
           "lastOutcome": {
-            "description": "The last share outcome (shared, handed-off, assist, aborted, unverified), or declined, or cancelled (no decline was done), or stock (the OS row with no OS entry).",
+            "description": "The last share outcome (shared, handed-off, assist, aborted, unverified), or declined, or cancelled (no decline was done).",
             "type": "string",
             "optional": true
           },

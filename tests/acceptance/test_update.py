@@ -75,7 +75,7 @@ def test_update_in_place(zen, site, addon):
     first_meet = zen.chrome(SELECTED_KEY)
     zen.request_share()
     p = wait_picker(zen)
-    expected = [first_meet, key_of(zen, WIKI), key_of(zen, DOCS), "os"]
+    expected = [first_meet, key_of(zen, WIKI), key_of(zen, DOCS)]
     assert p["keys"] == expected, p
     assert_prompt_concealed(zen)
     status = zen.addon_call(addon, "getStatus")

@@ -19,7 +19,7 @@ uv run --with pytest --with pyyaml pytest tests/release
 HEADLESS=1 MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 uv run --project tests/acceptance pytest tests/acceptance
 ```
 
-The unit tests cover the row model, the picker's state machine, the share and decline sequences, the picker's header text and the startup checks, with stubbed Firefox internals. The install tests run the installer against fake profile trees and never touch a real profile. The release tests check the update manifest script and the workflows.
+The unit tests cover the row model, the screen and window rows, the picker's state machine with its two tabs, the live preview's one-capture rule, the share and decline sequences, the picker's header text and the startup checks, with stubbed Firefox internals. The install tests run the installer against fake profile trees and never touch a real profile. The release tests check the update manifest script and the workflows.
 
 The installer reads one environment variable, `ZEN_SHARE_PICKER_RELEASES_URL`. It is a test hook. It replaces the GitHub API URL that `--latest` asks for the latest release, so the install tests can point it at a fake. It has to be an HTTPS URL, like every URL the installer follows, and anything else is refused before a byte is written. Don't set it for a real install.
 
@@ -27,13 +27,19 @@ The acceptance tests drive a real Zen through Marionette, in a fresh temporary p
 
 On macOS, pressing Allow makes Zen check its screen-recording permission. If macOS denies it, that check would raise a system dialog in the middle of the run. So every test that presses Allow first reads the permission state, and skips with "macOS denies Zen screen capture" when it is denied. Grant Zen screen recording in System Settings to run them.
 
+The default runs never capture a real window or the screen. Tests of the Windows tab use fake windows (tab entries turned into window entries, previews off), and tests that list your real windows read only keys, ids and counts, never a title. The capture tests in `tests/acceptance/test_capture.py` are opt-in. They preview and share a real window and the screen, check that the live preview follows the highlight and that only one capture runs, and check that Enter shares the window or the screen. On macOS 15 and later, the first such capture can raise an alert asking whether Zen may bypass the system private window picker, and macOS can ask again later. So they skip unless you set `ZSP_CAPTURE_TESTS=1`, and they also skip headless and off macOS. Run them headful, at the machine, ready to answer the alert:
+
+```sh
+ZSP_CAPTURE_TESTS=1 MOZ_REMOTE_ALLOW_SYSTEM_ACCESS=1 uv run --project tests/acceptance pytest tests/acceptance/test_capture.py -rP
+```
+
 To run what CI runs, set `UV_NO_CONFIG=1` first so uv ignores any machine-level config.
 
 ## CI
 
 CI runs on every push and once a day. The unit tests run on Linux, the install and release tests on Linux and macOS, and the acceptance tests on Linux, headless, against the latest Zen release. So a Zen update that breaks the add-on shows up without a push. GitHub disables scheduled workflows after 60 days without repository activity. A daily run that has stopped is not a green one, so check that it is still running.
 
-On headless Linux, Zen's prompt has no screen, window or operating-system entry. One test skips its half that needs one, with a reason that says so.
+On headless Linux, Zen's prompt has no screen, window or operating-system entry. The tests that need a real one skip, with a reason that says so; the Windows tab runs there on fake windows.
 
 ## Releasing
 

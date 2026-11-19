@@ -41,7 +41,7 @@ def test_request_share_shows_the_stock_prompt(zen, site):
 
 
 def test_addon_reports_its_version(zen, addon):
-    assert zen.addon_call(addon, "getStatus")["version"] == "0.1.0"
+    assert zen.addon_call(addon, "getStatus")["version"] == "0.2.0"
 
 
 # -- the harness's own guards, without a Zen ---------------------------------

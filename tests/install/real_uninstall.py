@@ -124,7 +124,7 @@ def disk_state(profile: Path, names: list[str]) -> dict:
 
 
 def main() -> int:
-    names = block_pref_names()
+    names = block_pref_names(list_windows=True)
     profile = Path(tempfile.mkdtemp(prefix="zen-share-picker-uninstall-"))
     try:
         quiet = {k: v for k, v in BASE_PREFS.items() if not k.startswith("extensions.")}
