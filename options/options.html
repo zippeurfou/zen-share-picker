@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Zen Share Picker</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <h1>Zen Share Picker</h1>
+
+    <section>
+      <h2>Status</h2>
+      <p>
+        <span id="state">loading</span>
+        <span class="muted">(version <span id="version"></span>)</span>
+      </p>
+      <p id="failed-box" hidden>
+        Failed checks: <span id="failed"></span>. Share prompts stay as Zen shows them. Switch the
+        picker on to run the checks again. If <code>modules</code> failed, nothing can retry
+        until you restart Zen, and a <code>start</code> failure may need a restart too.
+      </p>
+      <dl>
+        <dt>Share mode</dt>
+        <dd id="share-mode"></dd>
+        <dt>Preview mode</dt>
+        <dd id="preview-mode"></dd>
+        <dt>Last outcome</dt>
+        <dd id="last-outcome"></dd>
+        <dt>Prompts without a picker</dt>
+        <dd id="problems"></dd>
+      </dl>
+      <label class="switch">
+        <input type="checkbox" id="enabled" disabled />
+        Show the tab picker on share prompts (resets when Zen restarts)
+      </label>
+    </section>
+
+    <section>
+      <h2>Debug log</h2>
+      <p class="muted">
+        Kept in memory only. It holds hosts and device ids, never a title or an image, and is
+        emptied when you switch it off.
+      </p>
+      <label class="switch">
+        <input type="checkbox" id="debug" disabled />
+        Log picker decisions (resets when Zen restarts)
+      </label>
+      <pre id="log"></pre>
+    </section>
+
+    <script src="options.js"></script>
+  </body>
+</html>

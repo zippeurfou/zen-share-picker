@@ -1,0 +1,30 @@
+{
+  "manifest_version": 2,
+  "name": "Zen Share Picker",
+  "version": "0.1.0",
+  "description": "A centered, keyboard-first tab picker for Zen's screen-share prompt.",
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "zen-share-picker@zippeurfou.github.io",
+      "strict_min_version": "160.0",
+      "update_url": "https://github.com/zippeurfou/zen-share-picker/releases/latest/download/updates.json"
+    }
+  },
+  "background": {
+    "scripts": ["src/background.js"],
+    "persistent": true
+  },
+  "options_ui": {
+    "page": "options/options.html"
+  },
+  "experiment_apis": {
+    "sharePicker": {
+      "schema": "src/experiment/schema.json",
+      "parent": {
+        "scopes": ["addon_parent"],
+        "paths": [["sharePicker"]],
+        "script": "src/experiment/api.js"
+      }
+    }
+  }
+}

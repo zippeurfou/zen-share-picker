@@ -1,0 +1,194 @@
+/* Layout B: the header naming the asking site on top, the search list on
+   the left, a large preview on the right, the buttons under both. Centered
+   in the window (P37). */
+
+#zen-share-picker {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 2147483647;
+  box-sizing: border-box;
+  width: min(1040px, 92vw);
+  height: min(620px, 86vh);
+  display: grid;
+  grid-template-columns: minmax(280px, 2fr) 3fr;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 12px;
+  background: Canvas;
+  color: CanvasText;
+  border: 1px solid color-mix(in srgb, CanvasText 20%, transparent);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.35);
+  font: menu;
+  font-size: 13px;
+}
+
+#zen-share-picker-header {
+  grid-column: 1 / -1;
+  font-size: 15px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+#zen-share-picker [hidden] {
+  display: none !important;
+}
+
+#zen-share-picker .zsp-left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 8px;
+}
+
+#zen-share-picker-search {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, CanvasText 25%, transparent);
+  background: Field;
+  color: FieldText;
+  font: inherit;
+  font-size: 14px;
+}
+
+#zen-share-picker-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+#zen-share-picker .zsp-space-header {
+  margin: 10px 8px 4px;
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+#zen-share-picker .zsp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  cursor: default;
+}
+
+#zen-share-picker .zsp-row[aria-selected="true"] {
+  background: SelectedItem;
+  color: SelectedItemText;
+}
+
+#zen-share-picker .zsp-row[data-group="os"] {
+  margin-top: 6px;
+  border-top: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+  padding-top: 10px;
+}
+
+#zen-share-picker .zsp-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+}
+
+#zen-share-picker .zsp-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+#zen-share-picker .zsp-title,
+#zen-share-picker .zsp-host {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+#zen-share-picker .zsp-host {
+  font-size: 11px;
+  opacity: 0.7;
+}
+
+#zen-share-picker .zsp-careful {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: #b45309;
+  color: white;
+}
+
+#zen-share-picker .zsp-hints {
+  font-size: 11px;
+  opacity: 0.8;
+}
+
+#zen-share-picker .zsp-hint[data-hint="confirm"] {
+  font-weight: 600;
+  opacity: 1;
+}
+
+#zen-share-picker-preview {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  border-radius: 8px;
+  background: color-mix(in srgb, CanvasText 6%, transparent);
+  overflow: hidden;
+}
+
+#zen-share-picker-preview canvas,
+#zen-share-picker-preview .zsp-live {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+#zen-share-picker .zsp-no-preview {
+  opacity: 0.6;
+}
+
+#zen-share-picker .zsp-buttons {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+#zen-share-picker .zsp-buttons button {
+  appearance: none;
+  padding: 6px 16px;
+  border: none;
+  border-radius: 6px;
+  font: inherit;
+}
+
+#zen-share-picker-cancel {
+  background: color-mix(in srgb, CanvasText 8%, transparent);
+  color: CanvasText;
+}
+
+#zen-share-picker-cancel:hover {
+  background: color-mix(in srgb, CanvasText 14%, transparent);
+}
+
+#zen-share-picker-share {
+  background: var(--zen-primary-color, AccentColor);
+  /* As Zen does for text on its own colors (zen-split-view.css). */
+  color: contrast-color(var(--zen-primary-color, AccentColor));
+  font-weight: 600;
+}
+
+#zen-share-picker-share:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+
+#zen-share-picker .zsp-buttons button:disabled {
+  opacity: 0.5;
+}

@@ -1,0 +1,75 @@
+[
+  {
+    "namespace": "sharePicker",
+    "description": "A centered, keyboard-first tab picker for Zen's screen-share prompt.",
+    "types": [
+      {
+        "id": "Status",
+        "type": "object",
+        "properties": {
+          "state": {
+            "description": "inert: a startup check failed. disabled: turned off with setEnabled, or shut down.",
+            "type": "string",
+            "enum": ["starting", "active", "inert", "disabled"]
+          },
+          "failedChecks": {
+            "description": "Reason codes of the startup checks that failed.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "promptProblems": {
+            "description": "Reason codes of prompts that got no picker.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "shareMode": { "type": "string" },
+          "previewMode": { "type": "string" },
+          "lastOutcome": {
+            "description": "The last share outcome (shared, handed-off, assist, aborted, unverified), or declined, or cancelled (no decline was done), or stock (the OS row with no OS entry).",
+            "type": "string",
+            "optional": true
+          },
+          "debug": { "description": "Whether the debug log is on.", "type": "boolean" },
+          "version": { "type": "string" }
+        }
+      }
+    ],
+    "functions": [
+      {
+        "name": "start",
+        "type": "function",
+        "description": "Starts the picker and resolves to the status. Calling it again returns the same start.",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "getStatus",
+        "type": "function",
+        "description": "The current status, once start-up is over.",
+        "async": true,
+        "parameters": []
+      },
+      {
+        "name": "setEnabled",
+        "type": "function",
+        "description": "Turns the picker on or off until Zen restarts, and resolves to the new status. Off closes every open picker without sharing. On runs the startup checks again, also after they failed. Nothing is stored.",
+        "async": true,
+        "parameters": [{ "name": "on", "type": "boolean" }]
+      },
+      {
+        "name": "setDebug",
+        "type": "function",
+        "description": "Turns the in-memory debug log on or off until Zen restarts. Off also empties the log.",
+        "async": true,
+        "parameters": [{ "name": "on", "type": "boolean" }]
+      },
+      {
+        "name": "getLog",
+        "type": "function",
+        "description": "The debug log lines, oldest first, at most 2000. They hold reason codes, counts, hosts and device ids, never a title or an image; another space's hosts only once Tab revealed them.",
+        "async": true,
+        "parameters": []
+      }
+    ]
+  }
+]
