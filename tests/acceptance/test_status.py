@@ -71,9 +71,10 @@ def test_options_page_shows_status(zen, addon):
         page.wait(
             "return document.getElementById('state').textContent == 'active';", "active"
         )
-        assert page.text("#version") == "0.2.0"
+        assert page.text("#version") == "0.3.0"
         assert page.text("#share-mode") == share_mode()
         assert page.text("#preview-mode") != ""
+        assert page.text("#bar-problems") == "none"
         assert page.eval("return document.getElementById('failed-box').hidden;") is True
         labels = page.eval(
             """
@@ -88,6 +89,7 @@ def test_options_page_shows_status(zen, addon):
         page.click("#debug")
     s = status(zen, addon)
     assert s["debug"] is True, s
+    assert s["barProblems"] == [], s
     with zen.options_page(addon) as page:
         page.wait("return document.getElementById('debug').checked;", "debug checked")
         page.click("#enabled")

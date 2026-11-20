@@ -22,6 +22,11 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "barProblems": {
+            "description": "Reason codes of sharing bars left as Firefox shows them.",
+            "type": "array",
+            "items": { "type": "string" }
+          },
           "shareMode": { "type": "string" },
           "previewMode": { "type": "string" },
           "lastOutcome": {

@@ -41,7 +41,20 @@ def test_request_share_shows_the_stock_prompt(zen, site):
 
 
 def test_addon_reports_its_version(zen, addon):
-    assert zen.addon_call(addon, "getStatus")["version"] == "0.2.0"
+    assert zen.addon_call(addon, "getStatus")["version"] == "0.3.0"
+
+
+def test_addon_has_its_icon(zen, addon):
+    url = zen.chrome(
+        """
+        const { AddonManager } = ChromeUtils.importESModule(
+          "resource://gre/modules/AddonManager.sys.mjs");
+        const a = await AddonManager.getAddonByID(args[0]);
+        return a.iconURL;
+        """,
+        addon,
+    )
+    assert url is not None and url.endswith("icons/icon.svg"), url
 
 
 # -- the harness's own guards, without a Zen ---------------------------------

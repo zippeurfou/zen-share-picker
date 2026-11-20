@@ -2,7 +2,7 @@
 
 A Zen Browser add-on that puts a large, keyboard-first picker for tabs, windows and screens on top of Zen's screen-share prompt.
 
-When a video-call site asks to share your screen, Zen shows Firefox's standard prompt: a small panel at the top left with a dropdown that lists tabs by title, one line each. You see one entry at a time, and a preview only of the entry you already picked. Telling two similar tabs apart is hard, and it all happens while people are watching. This add-on opens a picker with a search box, a list of your tabs with their icons and hosts, and a big preview of the highlighted tab. Tabs from your other spaces stay hidden until you ask for them. The picker's Windows tab lists your screens and windows, with a live preview of the one you highlight. On macOS it lists them only when you install with `--list-windows`.
+When a video-call site asks to share your screen, Zen shows Firefox's standard prompt: a small panel at the top left with a dropdown that lists tabs by title, one line each. You see one entry at a time, and a preview only of the entry you already picked. Telling two similar tabs apart is hard, and it all happens while people are watching. This add-on opens a picker with a search box, a list of your tabs with their icons and hosts, and a big preview of the highlighted tab. Tabs from your other spaces stay hidden until you ask for them. The picker's Windows tab lists your screens and windows, with a live preview of the one you highlight. On macOS it lists them only when you install with `--list-windows`. While you share on macOS, it also restyles Firefox's sharing bar: bigger, rounded, at the bottom center, with a Hide button.
 
 It is a privileged, unsigned add-on, so please read the start of "Install" before you run anything.
 
@@ -51,6 +51,34 @@ The preview on the right follows the highlight. For a tab it is a still image, r
 **The fail-safe.** If anything about Zen's prompt is not what the add-on expects, the picker doesn't open, and Zen's prompt is left exactly as Zen built it, in view. See "How the fail-safe works".
 
 The picker closes without sharing or declining when you switch to another tab or space in Zen, when Zen's prompt goes away, when a listed tab is closed or put to sleep, and when you turn the picker off. None of these declines the request: it stays with Zen's prompt. Only Esc and Cancel decline.
+
+## The sharing bar
+
+While you share a tab, a window or your screen, Firefox shows a small floating bar that says what you share and has a Stop Sharing button. The add-on restyles that bar in place. In 0.3.0 it does so on macOS only; on Linux and Windows you keep Firefox's stock bar. It is still Firefox's bar: Firefox decides when it shows, and Stop sharing does what it always did.
+
+The look:
+
+* A rounded pill, 44px tall, light or dark like Zen's own windows.
+* From left to right: a grip, an icon, the label, then two buttons, Hide and Stop sharing. Both take Zen's accent color, or your system's.
+* When you share your whole screen, the icon and the edge turn amber.
+
+Where it sits:
+
+* At the bottom center of the call's window. When the call's tab is the one in front in its window, the bar sits 88px above the bottom of the page, clear of the toolbars of most call sites. When another tab is in front, it sits 16px above the bottom.
+* It follows tab switches and resizes of that window.
+* You can drag it anywhere. After you drag it, it stays where you dropped it until the share ends.
+
+Hide hides the bar until a new share starts, or until every share ends. A share you already had running doesn't bring it back. While it is hidden, you can still stop a share from the sharing icon in the macOS menu bar, which keeps the bar hidden, from Zen's site panel, or from the site itself.
+
+The label names the share type and the site that asked, in English: "Sharing a tab with call.example", "Sharing a Zen window with call.example", "Sharing a window with call.example" or "Sharing your entire screen with call.example". When several sites share, or a sharing page has no `http:` or `https:` host, the site is dropped. The label never holds the title of a tab or a window.
+
+Other rules:
+
+* It applies to every share in Zen, also the ones not started from the picker.
+* It stays on when you switch the picker off. To get Firefox's own bar back, disable the add-on.
+* With `privacy.webrtc.globalMuteToggles` on (the bar's microphone and camera toggles), the bar stays as Firefox builds it.
+* The add-on never shows a bar that `privacy.webrtc.hideGlobalIndicator` hides.
+* Disabling or removing the add-on, even in the middle of a share, puts back Firefox's stock bar.
 
 ## Requirements
 
@@ -198,7 +226,7 @@ The status page shows both. Open `about:addons`, pick Zen Share Picker and open 
 
 ## Troubleshooting
 
-The options page shows the state (`active`, `inert`, `disabled` or `starting`), the version, the failed checks, the last outcome, the codes of the last 10 prompts that got no picker, the on/off switch and the debug log.
+The options page shows the state (`active`, `inert`, `disabled` or `starting`), the version, the failed checks, the last outcome, the codes of the last 10 prompts that got no picker, the sharing bar's problems, the on/off switch and the debug log.
 
 The on/off switch lasts until Zen restarts. The add-on starts switched on every time, so to turn the picker off for good, disable the add-on in `about:addons`.
 
@@ -227,6 +255,16 @@ After a Zen update, a failed check or a repeated code usually means Zen changed 
 
 **The last outcome.** `shared` means the tab, window or screen is being shared and the add-on saw it. `handed-off` means your system's picker took over. `declined` means you pressed Esc or Cancel and the request was declined. `cancelled` means you pressed Esc or Cancel but nothing was declined: the prompt was already gone, or the decline failed and Zen's prompt is yours to answer. `aborted` means nothing was clicked, for example because the prompt went away first. `unverified` means Allow was pressed, but the add-on never saw the share start.
 
+**The sharing bar looks like Firefox's stock bar.** On Linux and Windows, or with `privacy.webrtc.globalMuteToggles` on, that is on purpose (see "The sharing bar"). Otherwise look under "Sharing bar problems" on the options page. Each code means the restyle didn't apply or was undone, and you get the stock bar back, so sharing and Stop Sharing work as usual:
+
+| Code | Meaning |
+|---|---|
+| `bar-unknown-markup` | The bar is missing an element or a function the restyle relies on. Usually a Zen update. |
+| `bar-style-failed` | Something threw while restyling the bar, and the restyle was undone. |
+| `bar-internal` | Something threw on a later update of the bar, or the add-on couldn't start watching for bars. |
+
+The add-on keeps the last 10 codes.
+
 **The outcome is `assist`.** Zen didn't take the add-on's click on Allow in time, for example because the window wasn't active. Your tab, window or screen is already selected in Zen's prompt, with its preview. Press Allow yourself. The add-on never presses it again for that prompt.
 
 **The installer says Zen is running.** Quit Zen with Cmd+Q and run the same command again. The script also refuses when it can't tell whether the profile is locked, and the message says why.
@@ -239,7 +277,8 @@ After a Zen update, a failed check or a repeated code usually means Zen changed 
 * the number of screens and windows the picker lists, and of windows it hid (Zen's own, or every window when it can't tell);
 * the hosts of current-space rows, and of other spaces' rows once you press Tab;
 * device ids (Firefox's numbers for the tabs, screens and windows in the prompt);
-* outcome and problem codes, including the steps of each share, any failed check, and the switch going off or on.
+* outcome and problem codes, including the steps of each share, any failed check, and the switch going off or on;
+* the sharing bar's lines: `bar placed 88` and `bar placed 16` (the gap it sits at), `bar hidden N shares` (N is a count), `bar dragged`, `bar shown new-share`, `bar stock mute-toggles`, `bar stock platform` and `bar hide refused`.
 
 It never holds an image, or the title of a tab or a window. The total tab count includes tabs from other spaces that other windows show, so the log tells how many there are, but not what they are. Check the hosts before pasting it into an issue.
 
@@ -258,6 +297,10 @@ It never holds an image, or the title of a tab or a window. The total tab count 
 * With `--list-windows`, on macOS 15 and later, macOS can show an alert about Zen bypassing the system private window picker at the first window preview or share, maybe at the first screen one too, and again later (see "Listing windows").
 * Windows are listed in Zen's order, not most recently used first.
 * Switching the picker back on while a share prompt is open doesn't open a picker on that prompt until Zen shows it again.
+* The sharing bar's label and buttons are in English only.
+* The sharing bar doesn't know about Zen's split view. It centers on the selected pane. When the call's tab shows in a split but isn't the selected tab, the bar sits 16px above the bottom, and may cover the call's own controls. Drag it away.
+* If you disable or remove the add-on in the middle of a share, Firefox's stock bar goes back to the top center (unless you dragged it), but it no longer re-centers itself on later changes during that share.
+* The sharing bar is still Firefox's window, so its corners and shadow are drawn by the system.
 
 Not supported:
 

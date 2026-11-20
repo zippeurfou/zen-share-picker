@@ -794,3 +794,594 @@ def test_chrome_live_preview_of_a_tab(zen, site):
     assert seen["ended"] == seen["tracks"] >= 1, seen
     assert seen["cleared"], seen
     assert after == before, after
+
+
+# -- the sharing bar ----------------------------------------------------------
+
+BAR_SPIKE_PLATFORM = "the spike runs on macOS"
+
+# The sharing bar's elements a restyle relies on.
+BAR_IDS = [
+    "display-share",
+    "display-share-icon",
+    "stop-sharing",
+    "drag-indicator",
+    "device-share",
+    "window-controls",
+    "window-share-info",
+    "browser-window-share-info",
+    "screen-share-info",
+]
+
+
+def bar_spike_setup(zen):
+    """Skips off macOS and when macOS denies Zen screen capture."""
+    if sys.platform != "darwin":
+        pytest.skip(BAR_SPIKE_PLATFORM)
+    if zen.screen_capture_denied():
+        pytest.skip("macOS denies Zen screen capture; Allow would raise a macOS dialog")
+
+
+def share_or_skip(zen, url, path="share"):
+    """`zen.share_tab(url, path)`, after `zen.settle()`; skips when the
+    window cannot become active."""
+    zen.settle()
+    try:
+        zen.share_tab(url, path)
+    except ZenScriptError as e:
+        if "become active" in str(e) or "screen locked" in str(e):
+            pytest.skip(LOCKED)
+        raise
+
+
+def bar_windows(zen, size):
+    """The test Zen's on-screen windows of `size` ([w, h], 2 px slack) and
+    their alphas, from the window server's list; None off macOS."""
+    found = zen.os_windows()
+    if found is None:
+        return None
+    return [
+        w["alpha"]
+        for w in found
+        if abs(w["bounds"][2] - size[0]) <= 2 and abs(w["bounds"][3] - size[1]) <= 2
+    ]
+
+
+# The bar's markup, the latest share's browser window, and the bar's moves:
+# one `moveTo` outside any update, then 5 updates. Every
+# `MozUpdateWindowPos` records its phase and where the bar is then, as an
+# offset from the position set.
+BAR_MARKUP_AND_MOVES = """
+const [ids] = args;
+const doc = bar.document;
+const root = doc.documentElement;
+const sleep = ms => new Promise(r => win.setTimeout(r, ms));
+const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+const streams = webrtcUI.getActiveStreams(true, true, true, true, true);
+const last = streams[streams.length - 1];
+const owner = last?.browser?.documentGlobal;
+const out = {
+  rootId: root.id == "webrtcIndicator",
+  updateType: typeof bar.updateIndicatorState,
+  ids: Object.fromEntries(ids.map(id => [id, !!doc.getElementById(id)])),
+  visible: root.getAttribute("visible"),
+  streams: streams.length,
+  latestHasGBrowser: !!owner?.gBrowser,
+  latestSelected: !!last && owner?.gBrowser?.selectedBrowser === last.browser,
+};
+const start = [bar.screenX, bar.screenY];
+const target = [start[0] + 20, start[1] - 20];
+const seen = [];
+let phase = "move";
+const onPos = () => seen.push({ phase, dx: bar.screenX - target[0], dy: bar.screenY - target[1] });
+bar.windowRoot.addEventListener("MozUpdateWindowPos", onPos);
+let movedMs = null;
+try {
+  const t0 = ChromeUtils.now();
+  bar.moveTo(target[0], target[1]);
+  await waitFor(() => bar.screenX != start[0] || bar.screenY != start[1], "the bar to move", 1000);
+  movedMs = Math.round(ChromeUtils.now() - t0);
+} catch (e) {}
+await sleep(500);
+const afterMove = [bar.screenX - target[0], bar.screenY - target[1]];
+phase = "updates";
+for (let i = 0; i < 5; i++) {
+  bar.updateIndicatorState();
+  await sleep(100);
+}
+await sleep(300);
+bar.windowRoot.removeEventListener("MozUpdateWindowPos", onPos);
+const of = p => seen.filter(s => s.phase == p);
+const max = p => Math.max(0, ...of(p).map(s => Math.max(Math.abs(s.dx), Math.abs(s.dy))));
+out.move = { movedMs, afterMove, events: of("move").length, maxDelta: max("move") };
+out.updates = { events: of("updates").length, maxDelta: max("updates"),
+                deltas: of("updates").map(s => [s.dx, s.dy]),
+                 after: [bar.screenX - target[0], bar.screenY - target[1]] };
+out.size = [bar.outerWidth, bar.outerHeight];
+out.start = start;
+out.target = target;
+const s = bar.screen;
+out.screen = [s.availLeft, s.availTop, s.availWidth, s.availHeight];
+return out;
+"""
+
+# Sets the bar's native window visibility to args[0]; the error name if it throws.
+BAR_VISIBILITY = """
+try {
+  bar.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow).visibility = args[0];
+} catch (e) {
+  return e.name || "error";
+}
+return null;
+"""
+
+# Sets or clears the bar's window opacity style.
+BAR_OPACITY = """
+const s = bar.document.documentElement.style;
+if (args[0]) {
+  s.setProperty("-moz-window-opacity", "0");
+  s.setProperty("pointer-events", "none");
+} else {
+  s.removeProperty("-moz-window-opacity");
+  s.removeProperty("pointer-events");
+}
+"""
+
+
+def test_sharing_bar_opens_moves_and_hides(zen, site):
+    """S10. During a tab share Firefox opens its sharing bar with the
+    markup a restyle relies on; the latest share's browser is its window's
+    selected browser; the bar moves where it is told within 1 s, and the
+    positions read in `MozUpdateWindowPos` handlers show how far Firefox's
+    own updates move it; its native visibility can be set off and on."""
+    bar_spike_setup(zen)
+    share_or_skip(zen, "http://docs.test/s10")
+    seen = zen.bar(BAR_MARKUP_AND_MOVES, BAR_IDS)
+    headful = os.environ.get("HEADLESS") != "1"
+    before = bar_windows(zen, seen["size"]) if headful else None
+    hide_error = zen.bar(BAR_VISIBILITY, False)
+    time.sleep(0.5)
+    after = bar_windows(zen, seen["size"]) if headful else None
+    opacity = None
+    if after:
+        zen.bar(BAR_OPACITY, True)
+        time.sleep(0.5)
+        opacity = bar_windows(zen, seen["size"])
+        zen.bar(BAR_OPACITY, False)
+    show_error = zen.bar(BAR_VISIBILITY, True)
+    spike(
+        "S10",
+        {
+            **seen,
+            "hideError": hide_error,
+            "showError": show_error,
+            "osBefore": before,
+            "osAfterHide": after,
+            "osAfterOpacity": opacity,
+        },
+    )
+    assert seen["rootId"], seen
+    assert seen["updateType"] == "function", seen
+    assert all(seen["ids"].values()), seen
+    assert seen["visible"] == "true", seen
+    assert seen["latestHasGBrowser"] and seen["latestSelected"], seen
+    assert seen["move"]["movedMs"] is not None, seen
+    assert seen["move"]["afterMove"] == [0, 0], seen
+    # Not asserted: on a second display Firefox's own updates clamp the bar
+    # to the screen its window reports (`ensureOnScreen`), hundreds of px
+    # away, and fire `MozUpdateWindowPos` there.
+    assert seen["updates"]["events"] == len(seen["updates"]["deltas"]), seen
+    assert hide_error is None and show_error is None
+    if headful:
+        assert before, before
+        assert not after or all(a == 0 for a in opacity or [1]), (after, opacity)
+
+
+# A test sheet: a taller bar with a margin around its body, and a colored icon.
+SPIKE_SHEET = (
+    ":root { --indicator-height: 64px; padding: 6px; }\n"
+    "body { height: 44px; border-radius: 22px; }\n"
+    "#display-share-icon { fill: #b36200; }\n"
+)
+SPIKE_FILL = "rgb(179, 98, 0)"
+# Lifts both height caps, should the variable alone not do it.
+SPIKE_UNCAP = ":root, body { max-height: none !important; }\n"
+
+# Three ways to add a sheet to the bar: A the window's author sheets, B an
+# adopted constructed sheet, C a <style> element. Each returns its undo.
+# `measure` reads the body's size against the window's, and the icon's fill.
+SHEET_JS = """
+function applySheet(bar, method, url, text) {
+  const doc = bar.document;
+  if (method == "A") {
+    bar.windowUtils.loadSheetUsingURIString(url, bar.windowUtils.AUTHOR_SHEET);
+    return () => bar.windowUtils.removeSheetUsingURIString(url, bar.windowUtils.AUTHOR_SHEET);
+  }
+  if (method == "B") {
+    const before = Array.from(doc.adoptedStyleSheets);
+    const sheet = new bar.CSSStyleSheet();
+    sheet.replaceSync(text);
+    doc.adoptedStyleSheets = [...before, sheet];
+    return () => { doc.adoptedStyleSheets = before; };
+  }
+  const style = doc.createElementNS("http://www.w3.org/1999/xhtml", "style");
+  style.textContent = text;
+  doc.documentElement.append(style);
+  return () => style.remove();
+}
+function measure(bar) {
+  const doc = bar.document;
+  const r = doc.body.getBoundingClientRect();
+  const cs = bar.getComputedStyle(doc.body);
+  const round = v => Math.round(v * 100) / 100;
+  return {
+    bodyHeight: round(parseFloat(cs.height)),
+    rect: [round(r.width), round(r.height)],
+    inner: [bar.innerWidth, bar.innerHeight],
+    margin: [round(bar.innerWidth - r.width), round(bar.innerHeight - r.height)],
+    fill: bar.getComputedStyle(doc.getElementById("display-share-icon")).fill,
+    radius: cs.borderTopLeftRadius,
+  };
+}
+function cspCounter() {
+  const counter = {
+    count: 0,
+    QueryInterface: ChromeUtils.generateQI(["nsIConsoleListener"]),
+    observe(m) {
+      if (/Content[- ]Security[- ]Policy/i.test(m.message || "")) counter.count++;
+    },
+  };
+  Services.console.registerListener(counter);
+  return counter;
+}
+"""
+
+# Each method in turn on the open bar, undone before the next: what an
+# update then lays out, and the CSP messages meanwhile.
+SHEET_METHODS = (
+    SHEET_JS
+    + """
+const [methods, url, text] = args;
+const sleep = ms => new Promise(r => win.setTimeout(r, ms));
+const out = { stock: measure(bar) };
+for (const m of methods) {
+  const csp = cspCounter();
+  let undo = null;
+  let error = null;
+  try {
+    undo = applySheet(bar, m, url, text);
+  } catch (e) {
+    error = e.name || "error";
+  }
+  bar.updateIndicatorState();
+  await sleep(300);
+  Services.console.unregisterListener(csp);
+  out[m] = { ...measure(bar), csp: csp.count, error };
+  undo?.();
+  bar.updateIndicatorState();
+  await sleep(100);
+}
+out.restored = measure(bar);
+return out;
+"""
+)
+
+# Applies method args[0] to the next sharing bar at its DOMContentLoaded,
+# before Firefox's `load` handler sizes it, and measures it after `load`
+# with no further update.
+WATCH_NEXT_BAR = (
+    SHEET_JS
+    + """
+const [method, url, text] = args;
+const state = { opened: 0, applied: false, error: null, atLoad: null };
+const observer = {
+  observe(subject, topic) {
+    if (topic != "domwindowopened") return;
+    const w = subject;
+    const onReady = () => {
+      if (w.document.documentURI != "chrome://browser/content/webrtcIndicator.xhtml") return;
+      w.removeEventListener("DOMContentLoaded", onReady, true);
+      state.opened++;
+      try {
+        applySheet(w, method, url, text);
+        state.applied = true;
+      } catch (e) {
+        state.error = e.name || "error";
+      }
+      w.addEventListener("load", () => { state.atLoad = measure(w); }, { once: true });
+    };
+    w.addEventListener("DOMContentLoaded", onReady, true);
+  },
+};
+Services.ww.registerNotification(observer);
+win.zspSpikeWatch = { state, observer };
+"""
+)
+
+UNWATCH_BAR = """
+const watch = win.zspSpikeWatch;
+Services.ww.unregisterNotification(watch.observer);
+delete win.zspSpikeWatch;
+return watch.state;
+"""
+
+# Firefox's own strings against changed markup: after `translateRoots()`
+# the Stop button keeps a text set without its l10n id, and an added span
+# keeps its text.
+L10N_KEEPS_TEXTS = """
+const doc = bar.document;
+const stop = doc.getElementById("stop-sharing");
+stop.removeAttribute("data-l10n-id");
+stop.textContent = "Stop sharing";
+const probe = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+probe.id = "zm-probe";
+probe.textContent = "x";
+doc.getElementById("display-share").append(probe);
+await doc.l10n.translateRoots();
+await new Promise(r => win.setTimeout(r, 200));
+return {
+  stop: stop.textContent == "Stop sharing",
+  probe: doc.getElementById("zm-probe")?.textContent == "x",
+};
+"""
+
+
+def map_spike_dir(zen, directory):
+    zen.chrome(
+        """
+        Services.io.getProtocolHandler("resource")
+          .QueryInterface(Ci.nsIResProtocolHandler)
+          .setSubstitution("zsp-spike", Services.io.newURI(args[0]));
+        """,
+        directory.as_uri() + "/",
+    )
+
+
+def unmap_spike_dir(zen):
+    zen.chrome(
+        """
+        Services.io.getProtocolHandler("resource")
+          .QueryInterface(Ci.nsIResProtocolHandler)
+          .setSubstitution("zsp-spike", null);
+        """
+    )
+
+
+def sheet_wins(result):
+    return result["error"] is None and result["csp"] == 0 and result["bodyHeight"] == 44
+
+
+def test_sharing_bar_takes_an_injected_sheet(zen, site, tmp_path):
+    """S11. Which way of adding a sheet works under the bar's CSP (it lifts
+    the height cap, keeps a margin around the body, colors the icon, with
+    no CSP message); whether a sheet added at DOMContentLoaded is in place
+    when Firefox first sizes the bar; and Firefox's localization leaves
+    changed texts alone."""
+    bar_spike_setup(zen)
+    (tmp_path / "spike.css").write_text(SPIKE_SHEET)
+    (tmp_path / "uncapped.css").write_text(SPIKE_SHEET + SPIKE_UNCAP)
+    map_spike_dir(zen, tmp_path)
+    try:
+        share_or_skip(zen, "http://docs.test/s11")
+        methods = zen.bar(
+            SHEET_METHODS,
+            ["A", "B", "C"],
+            "resource://zsp-spike/spike.css",
+            SPIKE_SHEET,
+        )
+        winner = next((m for m in "ABC" if sheet_wins(methods[m])), None)
+        uncapped = None
+        if winner is None:
+            applied = [m for m in "ABC" if methods[m]["fill"] == SPIKE_FILL]
+            if applied:
+                uncapped = zen.bar(
+                    SHEET_METHODS,
+                    applied[:1],
+                    "resource://zsp-spike/uncapped.css",
+                    SPIKE_SHEET + SPIKE_UNCAP,
+                )
+                if sheet_wins(uncapped[applied[0]]):
+                    winner = applied[0]
+        timing = l10n = None
+        if winner is not None:
+            url = "resource://zsp-spike/" + (
+                "uncapped.css" if uncapped else "spike.css"
+            )
+            text = SPIKE_SHEET + (SPIKE_UNCAP if uncapped else "")
+            zen.stop_all_shares()
+            zen.chrome(WATCH_NEXT_BAR, winner, url, text)
+            try:
+                share_or_skip(zen, "http://wiki.test/s11-second")
+                zen.bar("return null;")
+            finally:
+                timing = zen.chrome(UNWATCH_BAR)
+            l10n = zen.bar(L10N_KEEPS_TEXTS)
+    finally:
+        unmap_spike_dir(zen)
+    reference = (uncapped or methods).get(winner) if winner else None
+    spike(
+        "S11",
+        {
+            "methods": methods,
+            "winner": winner,
+            "uncapped": uncapped,
+            "timing": timing,
+            "l10n": l10n,
+            "sizedAtLoad": bool(
+                timing
+                and timing["atLoad"]
+                and reference
+                and timing["atLoad"]["inner"] == reference["inner"]
+            ),
+        },
+    )
+    assert winner is not None, methods
+    assert methods["stock"]["bodyHeight"] <= 30, methods["stock"]
+    assert reference["fill"] == SPIKE_FILL, reference
+    assert timing["opened"] == 1 and timing["applied"], timing
+    # The window is sized with the root's padding around the body.
+    assert reference["margin"] == [12, 12], reference
+    assert timing["atLoad"]["bodyHeight"] == 44, timing
+    # Firefox's first sizing at `load` already saw the sheet.
+    assert timing["atLoad"]["inner"] == reference["inner"], (timing, reference)
+    assert l10n == {"stop": True, "probe": True}, l10n
+
+
+# Wraps the bar's `updateIndicatorState`, original first, counting calls in
+# the browser window's `zspSpikeHook`. With `mode` "rehide" the wrapper then
+# hides the bar as Firefox's `setVisibility(false)` does. An observer counts
+# changes to the share attributes.
+HOOK_INSTALL = """
+const root = bar.document.documentElement;
+const hook = { count: 0, mode: null, attrCallbacks: 0, attrRecords: 0 };
+const original = bar.updateIndicatorState;
+bar.updateIndicatorState = function (...a) {
+  const value = original.apply(this, a);
+  hook.count++;
+  if (hook.mode == "rehide") {
+    bar.docShell.treeOwner.QueryInterface(Ci.nsIBaseWindow).visibility = false;
+    root.setAttribute("visible", "false");
+  }
+  return value;
+};
+const observer = new bar.MutationObserver(records => {
+  hook.attrCallbacks++;
+  hook.attrRecords += records.length;
+});
+observer.observe(root, { attributes: true,
+                         attributeFilter: ["sharingscreen", "sharingwindow", "sharingtab"] });
+win.zspSpikeHook = hook;
+win.zspSpikeBar = bar;
+"""
+
+HOOK_READ = """
+const root = bar.document.documentElement;
+const hook = win.zspSpikeHook;
+return {
+  count: hook.count,
+  attrCallbacks: hook.attrCallbacks,
+  attrRecords: hook.attrRecords,
+  sameWindow: bar === win.zspSpikeBar,
+  attrs: Object.fromEntries(["sharingscreen", "sharingwindow", "sharingtab", "visible"]
+    .map(a => [a, root.getAttribute(a)])),
+};
+"""
+
+# One update with the re-hiding wrapper: the `visible` changes, batch by
+# batch, as each record's old value then the value after the batch.
+HOOK_REHIDE = """
+const root = bar.document.documentElement;
+const hook = win.zspSpikeHook;
+const batches = [];
+const observer = new bar.MutationObserver(records => {
+  batches.push([...records.map(r => r.oldValue), root.getAttribute("visible")]);
+});
+observer.observe(root, { attributes: true, attributeOldValue: true,
+                         attributeFilter: ["visible"] });
+hook.mode = "rehide";
+bar.updateIndicatorState();
+await new Promise(r => win.setTimeout(r, 200));
+const hidden = root.getAttribute("visible");
+hook.mode = null;
+observer.disconnect();
+bar.updateIndicatorState();
+return { batches, hidden, restored: root.getAttribute("visible") };
+"""
+
+# Stops the share of the first tab on args[0] alone.
+STOP_ONE_SHARE = """
+const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+const browser = findTab(args[0]).linkedBrowser;
+const all = () => webrtcUI.getActiveStreams(false, false, true, true, true);
+const before = all().length;
+webrtcUI.stopSharingStreams(all().filter(s => s.browser === browser), false, false, true, true);
+await waitFor(() => all().length < before, "the share to stop", 10000);
+await new Promise(r => win.setTimeout(r, 500));
+return all().length;
+"""
+
+
+def test_sharing_bar_update_hook(zen, site):
+    """S12. A wrapper on the bar's `updateIndicatorState` sees Firefox's
+    updates for a second share and for a stopped share, in the same window;
+    a re-hide right after Firefox's update lands in one mutation batch;
+    stopping every share closes the bar, and the next share opens a new
+    window."""
+    bar_spike_setup(zen)
+    share_or_skip(zen, "http://docs.test/s12-first")
+    zen.bar(HOOK_INSTALL)
+    share_or_skip(zen, "http://wiki.test/s12-second")
+    second = zen.bar(HOOK_READ)
+    rehide = zen.bar(HOOK_REHIDE)
+    counted = zen.bar(HOOK_READ)["count"]
+    left = zen.chrome(STOP_ONE_SHARE, "http://meet.test/share")
+    stopped = zen.bar(HOOK_READ)
+    zen.stop_all_shares()
+    closed = not zen.bar_open()
+    share_or_skip(zen, "http://news.test/s12-third")
+    third = zen.bar("return { newWindow: bar !== win.zspSpikeBar };")
+    spike(
+        "S12",
+        {
+            "second": second,
+            "rehide": rehide,
+            "stop": {**stopped, "sharesLeft": left, "before": counted},
+            "closed": closed,
+            "third": third,
+        },
+    )
+    assert second["count"] >= 1 and second["sameWindow"], second
+    assert second["attrs"]["sharingtab"] == "true", second
+    assert second["attrs"]["visible"] == "true", second
+    assert rehide["hidden"] == "false" and rehide["restored"] == "true", rehide
+    # Firefox's "true" and the re-hide's "false" reach an observer together.
+    assert len(rehide["batches"]) == 1, rehide
+    assert rehide["batches"][0][-2:] == ["true", "false"], rehide
+    assert left == 1, left
+    assert stopped["count"] > counted and stopped["sameWindow"], stopped
+    assert closed
+    assert third["newWindow"], third
+
+
+# The bar's color scheme and system accent color against the browser window's.
+BAR_COLORS = """
+const probe = w => {
+  const doc = w.document;
+  const el = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+  el.style.color = "AccentColor";
+  (doc.body ?? doc.documentElement).append(el);
+  const color = w.getComputedStyle(el).color;
+  el.remove();
+  return color;
+};
+const dark = w => w.matchMedia("(prefers-color-scheme: dark)").matches;
+return { barDark: dark(bar), windowDark: dark(win),
+         barAccent: probe(bar), windowAccent: probe(win) };
+"""
+
+
+@pytest.mark.parametrize(
+    "prefs",
+    [
+        {},
+        {"ui.systemUsesDarkTheme": 1},
+        {"ui.systemUsesDarkTheme": 0},
+        {"browser.theme.toolbar-theme": 0},
+        {"browser.theme.toolbar-theme": 1},
+    ],
+    ids=["default", "system-dark", "system-light", "toolbar-dark", "toolbar-light"],
+)
+def test_sharing_bar_colors(launch_zen, site, prefs):
+    """S13. The bar's `prefers-color-scheme` and `AccentColor` under each
+    color pref, against the browser window's."""
+    if sys.platform != "darwin":
+        pytest.skip(BAR_SPIKE_PLATFORM)
+    zen = launch_zen(prefs)
+    bar_spike_setup(zen)
+    share_or_skip(zen, "http://docs.test/s13")
+    seen = zen.bar(BAR_COLORS)
+    spike("S13", {**seen, "prefs": prefs})
+    assert seen["barAccent"] == seen["windowAccent"], seen
+    # The system dark-theme pref sets the bar's color scheme.
+    if "ui.systemUsesDarkTheme" in prefs:
+        assert seen["barDark"] == bool(prefs["ui.systemUsesDarkTheme"]), seen

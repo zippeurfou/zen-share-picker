@@ -16,6 +16,9 @@ function render(status) {
   $("problems").textContent = status.promptProblems.length
     ? status.promptProblems.join(", ")
     : "none";
+  $("bar-problems").textContent = status.barProblems.length
+    ? status.barProblems.join(", ")
+    : "none";
 
   $("failed").textContent = status.failedChecks.join(", ");
   $("failed-box").hidden = status.failedChecks.length === 0;

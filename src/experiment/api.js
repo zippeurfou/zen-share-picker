@@ -25,8 +25,10 @@ const MODULES = {
   selfcheck: "src/glue/selfcheck.sys.mjs",
   conceal: "src/glue/conceal.sys.mjs",
   windows: "src/glue/windows.sys.mjs",
+  bar: "src/glue/bar.sys.mjs",
 };
 const CSS = "src/glue/picker.css";
+const BAR_CSS = "src/glue/bar.css";
 // Firefox internals; the startup checks cover both.
 const INTERNALS = {
   webrtcUI: ["resource:///modules/webrtcUI.sys.mjs", "webrtcUI"],
@@ -50,6 +52,7 @@ const statusOf = ({
   state,
   failedChecks = [],
   promptProblems = [],
+  barProblems = [],
   shareMode = "",
   previewMode = "",
   lastOutcome = null,
@@ -58,6 +61,7 @@ const statusOf = ({
   state,
   failedChecks: [...failedChecks],
   promptProblems: [...promptProblems],
+  barProblems: [...barProblems],
   shareMode,
   previewMode,
   lastOutcome,
@@ -145,6 +149,9 @@ class Picker {
     this.zenIds = new WeakMap();
     // Notifications whose Zen window ids could not be read, recorded once.
     this.idsUnknown = new WeakSet();
+    // P76: the sharing bars' watcher, from module load to shutdown.
+    this.bars = null;
+    this.barProblems = [];
   }
 
   start() {
@@ -189,6 +196,14 @@ class Picker {
     this.promptProblems.splice(0, this.promptProblems.length - MAX_PROBLEMS);
   }
 
+  // P80: a sharing bar left as Firefox shows it.
+  barProblem(code) {
+    logError(code);
+    this.record(`problem ${code}`);
+    this.barProblems.push(code);
+    this.barProblems.splice(0, this.barProblems.length - MAX_PROBLEMS);
+  }
+
   internal(name) {
     const [url, key] = INTERNALS[name];
     return ChromeUtils.importESModule(url)[key];
@@ -209,7 +224,41 @@ class Picker {
       return;
     }
     this.m = m;
+    this.startBars();
     await this.watch();
+  }
+
+  // P76: the bar restyle runs whenever the modules loaded, whatever the
+  // picker's state; only shutdown stops it.
+  startBars() {
+    try {
+      this.bars = this.m.bar.watchBars({ Services, onBar: win => this.onBar(win) });
+    } catch {
+      this.barProblem("bar-internal");
+    }
+  }
+
+  // Restyles one sharing bar; returns its release.
+  onBar(win) {
+    const m = this.m;
+    if (this.stopped || !m) {
+      return () => {};
+    }
+    let handle = null;
+    try {
+      handle = m.bar.restyleBar(win, {
+        Services,
+        webrtcUI: this.internal("webrtcUI"),
+        cssUrl: `resource://${this.host}/${BAR_CSS}`,
+        shape: m.config.BAR_SHAPE,
+        hideOpacity: m.config.BAR_HIDE_OPACITY,
+        record: line => this.record(line),
+        problem: code => this.barProblem(code),
+      });
+    } catch {
+      this.barProblem("bar-internal");
+    }
+    return () => handle?.release();
   }
 
   // The state is settled by the first browser window's checks.
@@ -1001,6 +1050,7 @@ class Picker {
       state: this.stopped ? "disabled" : this.state,
       failedChecks: this.failedChecks,
       promptProblems: this.promptProblems,
+      barProblems: this.barProblems,
       shareMode: this.m?.config.SHARE_MODE ?? "",
       previewMode: this.m?.config.PREVIEW_MODE ?? "",
       lastOutcome: this.lastOutcome,
@@ -1050,8 +1100,18 @@ class Picker {
     this.stopped = true;
     this.state = "disabled";
     this.generation++;
-    this.stopWatching();
-    this.firstWindow?.();
+    try {
+      this.stopWatching();
+      this.firstWindow?.();
+    } finally {
+      // The bars go back to stock even when the picker's teardown threw.
+      try {
+        this.bars?.stop();
+      } catch (e) {
+        logError(`bar stop failed: ${e?.name ?? "error"}`);
+      }
+      this.bars = null;
+    }
     this.m = null;
     resProto.setSubstitution(this.host, null);
   }

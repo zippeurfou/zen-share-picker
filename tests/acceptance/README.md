@@ -101,6 +101,38 @@ Skips, and why:
   macOS, Zen fades its panel's opacity, so the hiding checks wait up to a
   second for it.
 
+## Sharing bar tests
+
+`test_bar.py` checks Firefox's sharing bar as the add-on restyles it. Each
+test shares a tab through Zen's stock prompt and presses the real Allow,
+so it needs what the other Allow tests need: on macOS, Zen granted screen
+recording, otherwise the test skips with "macOS denies Zen screen
+capture; Allow would raise a macOS dialog". A tab share raises no macOS
+alert.
+
+- Firefox opens, moves and hides the bar headless, so these tests run
+  headless (`BAR_HEADLESS = True` in `test_bar.py`) and headful alike.
+  Headful, a test whose window can't become active skips with "the window
+  could not become active (screen locked?)".
+- `test_hide_removes_the_bar_from_the_screen` reads the macOS window
+  server's list (sizes and alpha, no pixels) to check that Hide takes the
+  bar off the screen. It skips headless ("needs the window server, run
+  headful") and off macOS.
+- The restyle runs on macOS only, so off macOS every test skips with "the
+  sharing bar restyle is macOS only", before Zen starts, except
+  `test_bar_stays_stock_off_macos`. That one shares a tab and checks the
+  bar has no marker, no added element and no wrapper; it skips with
+  "Firefox opened no sharing bar here" when no bar opens within 10 s.
+- On macOS each test waits up to 10 s for the bar after the share, and a
+  bar that never opens fails the test.
+- The tests read computed sizes, colors, positions and the window's
+  visibility in the bar's window, and never print a page title. The
+  whole-screen look is checked by setting Firefox's sharing attribute on a
+  live bar during a tab share, not by sharing the screen.
+- `test_bar.py` never shares a real window or the screen. A bar check that
+  needs one belongs in `test_capture.py` and is opt-in like the rest of it
+  (below).
+
 ## Capture tests (opt-in)
 
 `test_capture.py` previews and shares a real window and the screen: the

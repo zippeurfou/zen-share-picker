@@ -49,6 +49,10 @@ DEFAULT_BINARY = {
 ADDON_ID = "zen-share-picker@zippeurfou.github.io"
 NAMESPACE = "sharePicker"
 
+# The `windowtype` of Firefox's global sharing indicator, the sharing bar
+# (`chrome://browser/content/webrtcIndicator.xhtml`).
+INDICATOR_TYPE = "Browser:WebRTCGlobalIndicator"
+
 # The two prefs the add-on needs.
 ADDON_PREFS: dict[str, Any] = {
     "xpinstall.signatures.required": False,
@@ -351,6 +355,66 @@ function run(argv) {
              w.kCGWindowBounds.Width, w.kCGWindowBounds.Height],
   })));
 }
+"""
+
+
+# See Zen.bar(). Waits for the sharing bar's window and its `load`, then runs
+# the body with `bar` bound to it.
+_BAR = """
+const [__type, __ms] = args.splice(0, 2);
+let bar;
+try {
+  bar = await waitFor(() => {
+    const w = Services.wm.getMostRecentWindow(__type);
+    return w && !w.closed && w.document.readyState == "complete" && w;
+  }, "the sharing bar", __ms);
+} catch (e) {
+  return { noBar: true };
+}
+return { value: await (async () => {
+/*BODY*/
+})() };
+"""
+
+# See Zen.share_tab(). Selects the tab entry of browser id args[0] in the
+# open share prompt, as `test_stock_share_flow` does.
+_SELECT_TAB_ENTRY = """
+const list = win.document.getElementById("webRTC-selectWindow-menulist");
+const el = win.document.getElementById("webRTC-shareDevices-notification");
+const item = Array.from(list.menupopup.children).find(i => String(i.deviceId) == args[0]);
+if (!item) throw new Error("no entry for the tab");
+list.selectedItem = item;
+item.doCommand();
+if (el.hasAttribute("invalidselection")) {
+  item.dispatchEvent(new win.Event("command", { bubbles: true }));
+}
+if (el.hasAttribute("invalidselection")) throw new Error("the tab entry is invalid");
+"""
+
+# See Zen.share_tab(). Presses the prompt's real Allow once the enable delay
+# has passed, and waits until the tab args[0] is shared.
+_ALLOW_AND_WAIT = """
+const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+const n = shareNotification();
+const el = win.document.getElementById("webRTC-shareDevices-notification");
+const delay = Services.prefs.getIntPref("security.notification_enable_delay", 500);
+await waitFor(() => ChromeUtils.now() - n.timeShown >= delay, "the enable delay", 5000);
+el.button.click();
+await waitFor(() => webrtcUI.getActiveStreams(true, true, true, true, true)
+                      .flatMap(s => s.devices ?? [])
+                      .some(d => d.mediaSource == "browser" && String(d.rawId) == args[0]),
+              "the tab to be shared", 10000);
+"""
+
+# See Zen.stop_all_shares().
+_STOP_ALL_SHARES = """
+const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+webrtcUI.stopSharingStreams(webrtcUI.getActiveStreams(false, false, true, true, true),
+                            false, false, true, true);
+await waitFor(() => {
+  const w = Services.wm.getMostRecentWindow(args[0]);
+  return !w || w.closed;
+}, "the sharing bar to close", 10000);
 """
 
 
@@ -701,6 +765,24 @@ class Zen:
             raise RuntimeError(f"add-on is not active: {status}")
         return status
 
+    def set_addon_enabled(self, addon_id: str, on: bool) -> None:
+        """Enable or disable the installed add-on through `AddonManager`, as
+        about:addons does, and wait until that is done. Enabling waits
+        until it is active again."""
+        self.chrome(
+            """
+            const { AddonManager } = ChromeUtils.importESModule(
+              "resource://gre/modules/AddonManager.sys.mjs");
+            const addon = await AddonManager.getAddonByID(args[0]);
+            if (!addon) throw new Error("add-on not installed: " + args[0]);
+            await (args[1] ? addon.enable() : addon.disable());
+            """,
+            addon_id,
+            on,
+        )
+        if on:
+            self.wait_addon_active(addon_id)
+
     def glue(self, name: str) -> str:
         """The `resource://zen-share-picker-<v>/src/...` URL of module `name`
         (a path under `src/`, for example `"glue/prompt.sys.mjs"`), from the
@@ -985,13 +1067,16 @@ class Zen:
 
     # -- the stock share prompt ---------------------------------------------
 
-    def request_share(self, path: str = "share") -> None:
-        """Open `http://meet.test/<path>`, click the page centre with
-        WebDriver pointer actions (a trusted click, so the page has user
-        activation), and wait until Zen's share prompt is open for it.
-        Like a user's click, it first makes the window the active one: Zen
-        shows the prompt's panel only in the active window."""
-        self.visit(f"http://meet.test/{path}")
+    def request_share(
+        self, path: str = "share", origin: str = "http://meet.test"
+    ) -> None:
+        """Open `<origin>/<path>` (`http://meet.test/<path>` by default),
+        click the page centre with WebDriver pointer actions (a trusted
+        click, so the page has user activation), and wait until Zen's share
+        prompt is open for it. Like a user's click, it first makes the
+        window the active one: Zen shows the prompt's panel only in the
+        active window."""
+        self.visit(f"{origin}/{path}")
         x, y = self.chrome(
             """
             if (Services.focus.activeWindow != win) {
@@ -1243,6 +1328,51 @@ class Zen:
               .map(d => String(d.rawId));
             """
         )
+
+    def share_tab(
+        self, url: str, path: str = "share", origin: str = "http://meet.test"
+    ) -> None:
+        """Share the tab on `url` from `<origin>/<path>`, through the stock
+        prompt, as `test_stock_share_flow` does: open `url`, request the
+        share, select `url`'s tab entry and press the real Allow once the
+        enable delay has passed, then wait (10 s) until the tab is shared.
+        The caller has checked `screen_capture_denied()`."""
+        self.visit(url)
+        target = self.browser_id(url)
+        self.request_share(path, origin)
+        self.chrome(_SELECT_TAB_ENTRY, target)
+        self.chrome(_ALLOW_AND_WAIT, target)
+
+    def bar(self, body: str, *args: Any, timeout: float = 10) -> Any:
+        """Run `body` as `chrome()` does, with `bar` bound to the open
+        sharing bar's window, once it and its `load` are there (`timeout`
+        seconds at most). Raises `AssertionError("no sharing bar")` when
+        none opens."""
+        result = self.chrome(
+            _BAR.replace("/*BODY*/", body),
+            INDICATOR_TYPE,
+            int(timeout * 1000),
+            *args,
+            timeout=SCRIPT_TIMEOUT + timeout,
+        )
+        if result.get("noBar"):
+            raise AssertionError("no sharing bar")
+        return result["value"]
+
+    def bar_open(self) -> bool:
+        """Whether the sharing bar's window is open."""
+        return self.chrome(
+            """
+            const w = Services.wm.getMostRecentWindow(args[0]);
+            return !!w && !w.closed;
+            """,
+            INDICATOR_TYPE,
+        )
+
+    def stop_all_shares(self) -> None:
+        """Stop every screen, window and tab share, as the bar's own Stop
+        button does, and wait (10 s) until the sharing bar has closed."""
+        self.chrome(_STOP_ALL_SHARES, INDICATOR_TYPE)
 
     def wait_picker_armed(self, timeout: float = 10) -> None:
         """Wait until the open picker takes Enter and Share (P33): its Share

@@ -1,8 +1,14 @@
 {
   "manifest_version": 2,
   "name": "Zen Share Picker",
-  "version": "0.2.0",
-  "description": "A centered, keyboard-first tab, window and screen picker for Zen's screen-share prompt.",
+  "version": "0.3.0",
+  "description": "A centered, keyboard-first tab, window and screen picker for Zen's screen-share prompt, and a cleaner sharing bar.",
+  "icons": {
+    "16": "icons/icon-16.svg",
+    "32": "icons/icon.svg",
+    "48": "icons/icon.svg",
+    "96": "icons/icon.svg"
+  },
   "browser_specific_settings": {
     "gecko": {
       "id": "zen-share-picker@zippeurfou.github.io",

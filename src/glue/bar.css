@@ -1,0 +1,203 @@
+/* The sharing bar's look, added to Firefox's indicator window by
+   src/glue/bar.sys.mjs. Every rule sits under the add-on's marker, so the
+   sheet changes nothing on a bar without it. The --zm-* colors come from
+   the accent (accentTokens in src/lib/bar.mjs), set on the root by script. */
+
+/* The window: transparent, with a 6px margin around the surface.
+   --indicator-height lifts Firefox's 30px cap on the body. */
+:root[data-zen-share-picker-bar] {
+  --indicator-height: 64px;
+  padding: 6px;
+  background: transparent;
+  border: 0;
+}
+
+:root[data-zen-share-picker-bar] > body {
+  box-sizing: content-box;
+  height: 44px;
+  border: 0;
+  border-radius: 22px;
+  padding: 0 6px 0 12px;
+  align-items: center;
+  white-space: nowrap;
+  background: #f7f7f8;
+  color: #1d1d1f;
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.12);
+  font: 13.5px/1.2 -apple-system, system-ui, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-zen-share-picker-bar] > body {
+    background: #2a2a2e;
+    color: #f5f5f7;
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.1);
+  }
+}
+
+/* Firefox's mic and camera toggles, minimize button, separators and
+   labels stay in the document, hidden. */
+:root[data-zen-share-picker-bar] #device-share,
+:root[data-zen-share-picker-bar] .separator,
+:root[data-zen-share-picker-bar] #window-controls,
+:root[data-zen-share-picker-bar] #window-share-info,
+:root[data-zen-share-picker-bar] #browser-window-share-info,
+:root[data-zen-share-picker-bar] #screen-share-info {
+  display: none;
+}
+
+/* Order: grip, icon, label, divider, Hide, Stop sharing. */
+:root[data-zen-share-picker-bar] #drag-indicator {
+  order: -1;
+  flex: none;
+  width: 10px;
+  height: 16px;
+  margin: 0 6px 0 0;
+  opacity: 0.35;
+  fill-opacity: 1;
+}
+
+:root[data-zen-share-picker-bar] #display-share {
+  order: 0;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+}
+
+:root[data-zen-share-picker-bar] #display-share-icon {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  margin: 0 8px 0 0;
+  fill: var(--zm-accent, AccentColor);
+  fill-opacity: 1;
+}
+
+/* The verb truncates first; the site is the last thing to go. */
+:root[data-zen-share-picker-bar] .zm-share-label {
+  display: inline-flex;
+  min-width: 0;
+  max-width: var(--zm-label-max, 720px);
+  font-size: 13.5px;
+}
+
+:root[data-zen-share-picker-bar] .zm-verb {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+:root[data-zen-share-picker-bar] .zm-site {
+  flex: none;
+  font-weight: 600;
+  margin-left: 0.28em;
+}
+
+:root[data-zen-share-picker-bar] .zm-hide,
+:root[data-zen-share-picker-bar] #stop-sharing {
+  appearance: none;
+  box-sizing: border-box;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  border: 0;
+  border-radius: 16px;
+  font: 13px/1.2 -apple-system, system-ui, sans-serif;
+  white-space: nowrap;
+  cursor: default;
+}
+
+/* 10px, the 1px divider, 10px. */
+:root[data-zen-share-picker-bar] .zm-hide {
+  position: relative;
+  overflow: visible;
+  margin: 0 0 0 21px;
+  padding: 0 13px;
+  font-weight: 500;
+  background: var(--zm-tint);
+  color: var(--zm-ink);
+}
+
+:root[data-zen-share-picker-bar] .zm-hide::before {
+  content: "";
+  position: absolute;
+  left: -11px;
+  top: 8px;
+  width: 1px;
+  height: 16px;
+  background: #1d1d1f;
+  opacity: 0.18;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-zen-share-picker-bar] .zm-hide::before {
+    background: #f5f5f7;
+    opacity: 0.2;
+  }
+}
+
+:root[data-zen-share-picker-bar] .zm-hide:hover {
+  background: var(--zm-tint-hover);
+  color: var(--zm-ink-strong);
+}
+
+:root[data-zen-share-picker-bar] .zm-hide:active {
+  background: var(--zm-tint-pressed);
+  color: var(--zm-ink-strong);
+}
+
+:root[data-zen-share-picker-bar] #stop-sharing {
+  margin: 0 0 0 6px;
+  padding: 0 14px;
+  font-weight: 600;
+  background: var(--zm-fill, AccentColor);
+  color: var(--zm-fill-text, #fff);
+}
+
+:root[data-zen-share-picker-bar] #stop-sharing:hover {
+  background: var(--zm-fill-hover);
+}
+
+:root[data-zen-share-picker-bar] #stop-sharing:active {
+  background: var(--zm-fill-pressed);
+}
+
+/* The whole screen: an amber icon and edge; the surface and Stop stay. */
+:root[data-zen-share-picker-bar][sharingscreen] > body {
+  box-shadow: inset 0 0 0 1.5px rgba(214, 130, 0, 0.55);
+}
+
+:root[data-zen-share-picker-bar][sharingscreen] #display-share-icon {
+  fill: #b36200;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-zen-share-picker-bar][sharingscreen] #display-share-icon {
+    fill: #ffc46b;
+  }
+}
+
+/* Square window corners: the surface fills the window. */
+:root[data-zen-share-picker-bar][data-zm-shape="square"] {
+  padding: 0;
+  background: #f7f7f8;
+}
+
+:root[data-zen-share-picker-bar][data-zm-shape="square"] > body {
+  border-radius: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-zen-share-picker-bar][data-zm-shape="square"] {
+    background: #2a2a2e;
+  }
+}
+
+/* Hidden with BAR_HIDE_OPACITY: the window's opacity goes to 0 too. */
+:root[data-zen-share-picker-bar][data-zm-hidden="opacity"] {
+  -moz-window-opacity: 0;
+  pointer-events: none;
+}

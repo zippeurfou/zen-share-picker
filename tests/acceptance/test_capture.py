@@ -8,6 +8,8 @@ machine, to answer the alert. See README.md.
 The tests read the picker through `Zen.picker_keys()` (keys, never a
 title), reach a real window only by clicking its row's `data-key`, and
 reach the screen only with Home: nothing arrows across the owner's windows.
+The sharing bar tests turn the picker off and pick a window or screen in
+the stock prompt by its device id, then read the bar's label and colors.
 They print times and booleans only, and never copy a frame.
 """
 
@@ -17,9 +19,11 @@ import sys
 import time
 
 import pytest
+from test_bar import bar_or_skip, bar_state, expected_fill
 from test_picker import (
     headful_share,
     skip_if_capture_denied,
+    status,
     wait_gone,
     wait_picker_keys,
     wait_status,
@@ -340,3 +344,170 @@ def test_enter_shares_the_screen(launch_zen, site, addon_xpi):
     zen.chrome(START_SAMPLER)
     screen = go_home(zen, keys)
     share_and_check(zen, addon, "screen", screen.removeprefix("screen:"))
+
+
+# -- the sharing bar ----------------------------------------------------------
+
+# Selects the entry of device id args[0] in the open share prompt.
+SELECT_ENTRY = """
+const list = win.document.getElementById("webRTC-selectWindow-menulist");
+const el = win.document.getElementById("webRTC-shareDevices-notification");
+const item = Array.from(list.menupopup.children).find(i => String(i.deviceId) == args[0]);
+if (!item) throw new Error("no entry for the device");
+list.selectedItem = item;
+item.doCommand();
+if (el.hasAttribute("invalidselection")) {
+  item.dispatchEvent(new win.Event("command", { bubbles: true }));
+}
+if (el.hasAttribute("invalidselection")) throw new Error("the entry is invalid");
+"""
+
+# Presses the prompt's real Allow once the enable delay has passed, and
+# waits until a device of mediaSource args[0] and rawId args[1] is shared.
+# Long enough for the owner to answer the macOS alert.
+ALLOW_AND_WAIT = """
+const { webrtcUI } = ChromeUtils.importESModule("resource:///modules/webrtcUI.sys.mjs");
+const n = shareNotification();
+const el = win.document.getElementById("webRTC-shareDevices-notification");
+const delay = Services.prefs.getIntPref("security.notification_enable_delay", 500);
+await waitFor(() => ChromeUtils.now() - n.timeShown >= delay, "the enable delay", 5000);
+el.button.click();
+await waitFor(() => webrtcUI.getActiveStreams(true, true, true, true, true)
+                      .flatMap(s => s.devices ?? [])
+                      .some(d => d.mediaSource == args[0] && String(d.rawId) == args[1]),
+              "the device to be shared", args[2]);
+"""
+
+# Booleans and colors only: the bar's state attributes, the share icon's
+# fill and the body's edge, and the accent accentTokens derives from the
+# bar's own AccentColor (the test profile sets no accent pref).
+BAR_COLORS = """
+const { accentTokens } = ChromeUtils.importESModule(args[0]);
+const doc = bar.document;
+const root = doc.documentElement;
+const probe = doc.createElementNS("http://www.w3.org/1999/xhtml", "span");
+probe.style.color = "AccentColor";
+root.append(probe);
+const rgb = bar.getComputedStyle(probe).color.match(/\\d+/g).slice(0, 3).map(Number);
+probe.remove();
+const dark = bar.matchMedia("(prefers-color-scheme: dark)").matches;
+const hex = accentTokens(rgb, dark).accent;
+const accent = "rgb(" + [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16)).join(", ") + ")";
+const cs = sel => bar.getComputedStyle(doc.querySelector(sel));
+return {
+  dark,
+  sharingwindow: root.getAttribute("sharingwindow") == "true",
+  sharingscreen: root.getAttribute("sharingscreen") == "true",
+  accent,
+  fill: cs("#display-share-icon").fill,
+  edge: cs("body").boxShadow,
+};
+"""
+
+
+def bar_zen(launch_zen, addon_xpi):
+    """A test Zen that lists windows (no previews), with the add-on active
+    and the picker off, so a share request opens the stock prompt. The
+    restyle stays on (P76). Skips when macOS denies Zen screen capture."""
+    zen = launch_zen(LIST_WINDOWS_PREFS)
+    addon = zen.install_addon(str(addon_xpi))
+    zen.wait_addon_active(addon)
+    skip_if_capture_denied(zen)
+    assert zen.addon_call(addon, "setEnabled", False)["state"] == "disabled"
+    return zen, addon
+
+
+def open_stock_prompt(zen):
+    """Requests a share from meet.test and waits for the stock prompt. Its
+    entries exist only while it is open: read `stock_ids()` after this."""
+    zen.visit(DOCS)
+    zen.settle()
+    headful_share(zen)
+
+
+def stock_share(zen, kind, device_id):
+    """In the open stock prompt, picks `device_id` by id, presses Allow and
+    waits for the share and the bar."""
+    zen.chrome(SELECT_ENTRY, device_id)
+    zen.chrome(
+        ALLOW_AND_WAIT,
+        kind,
+        device_id,
+        FIRST_FRAME_S * 1000,
+        timeout=FIRST_FRAME_S + 10,
+    )
+    bar_or_skip(zen)
+
+
+def bar_colors(zen):
+    return zen.bar(BAR_COLORS, zen.glue("lib/bar.mjs"))
+
+
+def test_bar_for_a_window_share(launch_zen, site, addon_xpi, target):
+    _other, wid = target
+    zen, addon = bar_zen(launch_zen, addon_xpi)
+    try:
+        open_stock_prompt(zen)
+        assert wid in zen.stock_ids("window"), "the target window has no entry"
+        stock_share(zen, "window", wid)
+        s = bar_state(zen)
+        c = bar_colors(zen)
+        seen = {
+            "label": s["label"] == "Sharing a window with meet.test",
+            "marked": s["marked"],
+            "sharingwindow": c["sharingwindow"],
+            "accent_icon": c["fill"] == c["accent"],
+            "no_problems": status(zen, addon)["barProblems"] == [],
+        }
+        record("bar-window", seen)
+        assert all(seen.values()), seen
+    finally:
+        zen.stop_all_shares()
+
+
+def test_bar_for_a_zen_window_share(launch_zen, site, addon_xpi):
+    zen, addon = bar_zen(launch_zen, addon_xpi)
+    try:
+        open_stock_prompt(zen)
+        windows = zen.stock_ids("window")
+        own = [i for i in zen.zen_window_ids() if i in windows]
+        assert own, "no entry for this Zen's own window"
+        stock_share(zen, "window", own[0])
+        s = bar_state(zen)
+        c = bar_colors(zen)
+        seen = {
+            "label": s["label"] == "Sharing a Zen window with meet.test",
+            "marked": s["marked"],
+            "sharingwindow": c["sharingwindow"],
+            "no_problems": status(zen, addon)["barProblems"] == [],
+        }
+        record("bar-zen-window", seen)
+        assert all(seen.values()), seen
+    finally:
+        zen.stop_all_shares()
+
+
+def test_bar_for_the_whole_screen(launch_zen, site, addon_xpi):
+    zen, addon = bar_zen(launch_zen, addon_xpi)
+    try:
+        open_stock_prompt(zen)
+        screens = zen.stock_ids("screen")
+        assert screens, "no screen entry"
+        stock_share(zen, "screen", screens[0])
+        s = bar_state(zen)
+        c = bar_colors(zen)
+        stop = expected_fill(zen)
+        amber = "rgb(255, 196, 107)" if c["dark"] else "rgb(179, 98, 0)"
+        seen = {
+            "label": s["label"] == "Sharing your entire screen with meet.test",
+            "marked": s["marked"],
+            "sharingscreen": c["sharingscreen"],
+            "amber_icon": c["fill"] == amber,
+            "amber_edge": "rgba(214, 130, 0, 0.55)" in c["edge"],
+            "stop_accent": stop["got"] == stop["expected"],
+            "no_problems": status(zen, addon)["barProblems"] == [],
+        }
+        record("bar-screen", seen)
+        assert all(seen.values()), seen
+    finally:
+        zen.stop_all_shares()
