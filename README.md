@@ -2,6 +2,8 @@
 
 A Zen Browser add-on that puts a large, keyboard-first picker for tabs, windows and screens on top of Zen's screen-share prompt.
 
+![Demo: a site asks to share the screen, typing "zen" in the picker narrows it to one tab, Enter shares it, and the sharing bar appears at the bottom](docs/demo.gif)
+
 When a video-call site asks to share your screen, Zen shows Firefox's standard prompt: a small panel at the top left with a dropdown that lists tabs by title, one line each. You see one entry at a time, and a preview only of the entry you already picked. Telling two similar tabs apart is hard, and it all happens while people are watching. This add-on opens a picker with a search box, a list of your tabs with their icons and hosts, and a big preview of the highlighted tab. Tabs from your other spaces stay hidden until you ask for them. The picker's Windows tab lists your screens and windows, with a live preview of the one you highlight. On macOS it lists them only when you install with `--list-windows`. While you share on macOS, it also restyles Firefox's sharing bar: bigger, rounded, at the bottom center, with a Hide button.
 
 It is a privileged, unsigned add-on, so please read the start of "Install" before you run anything.
