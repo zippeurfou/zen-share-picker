@@ -287,7 +287,7 @@ channel is https and needs no pref change.
 | `addon_call(addon_id, method, *args)` | Calls `browser.sharePicker.<method>` of the add-on from chrome and returns the result. |
 | `wait_addon_active(addon_id) -> dict` | The add-on's status; raises unless it is `active`. |
 | `glue(name) -> str` | The `resource://zen-share-picker-<version>/src/<name>` URL of a module of the installed add-on. |
-| `options_page(addon_id)` | Context manager: opens the options page in a new tab and yields an `ExtensionPage` (`eval`, `wait`, `text`, `click`) running in the page. |
+| `options_page(addon_id)` | Context manager: opens the options page in a new tab and, once it has loaded, yields an `ExtensionPage` (`eval`, `wait`, `text`, `click`) running in the page. |
 | `open_window(*, private=False, synced=True) -> str` | Opens a browser window, selects it for the helpers without focusing it, and returns its handle. |
 | `wait_new_window(opener) -> str`, `use_window(handle, *, focus=False)`, `window` | Waits for a window `opener()` opens; selects another window; the selected window's handle. |
 

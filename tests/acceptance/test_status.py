@@ -103,6 +103,14 @@ def test_options_page_shows_status(zen, addon):
         assert page.eval("return document.getElementById('enabled').checked;") is False
 
 
+def test_options_page_is_loaded_when_handed_over(zen, addon):
+    with zen.options_page(addon) as page:
+        got = page.eval(
+            "return [document.URL.endsWith('/options/options.html'), document.readyState];"
+        )
+        assert got == [True, "complete"]
+
+
 def test_disable_stops_the_picker(zen, site, addon):
     s = zen.addon_call(addon, "setEnabled", False)
     assert s["state"] == "disabled", s
